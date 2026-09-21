@@ -83,6 +83,11 @@ export interface Snapshot {
   truncated: boolean;
   /** Hash of the significant UI state; used for settle detection. */
   hash: string;
+  /**
+   * The accessibility tree came back essentially empty — a Flutter/canvas/game
+   * surface. Element targeting will not work here; the agent needs pixels.
+   */
+  barren: boolean;
 }
 
 /** Re-resolved at action time; survives re-renders in a way refs cannot. */
@@ -139,6 +144,16 @@ export interface NotificationItem {
   text?: string;
   /** epoch ms, best effort */
   timestamp?: number;
+}
+
+/** An externally launchable entry point an app declares (Android intent filter). */
+export interface DeepLink {
+  scheme: string;
+  host?: string;
+  pathPrefix?: string;
+  /** Best-effort URL to hand `openUrl`. May need a real id substituted. */
+  example: string;
+  activity?: string;
 }
 
 export interface AppInfo {
@@ -211,6 +226,20 @@ export interface Device {
   readNotifications?(opts?: { limit?: number }): Promise<NotificationItem[]>;
   clipboardGet?(): Promise<string>;
   clipboardSet?(text: string): Promise<void>;
+
+  /**
+   * Cheap "has the UI stopped animating?" probe.
+   *
+   * Optional, and deliberately allowed to return undefined: it exists only to
+   * let settle detection finish early, never to make it finish wrongly.
+   */
+  isIdle?(): Promise<boolean | undefined>;
+
+  /**
+   * Entry points the app declares. A deep link collapses a whole navigation
+   * sequence into one action, so this is usually the cheapest route to a screen.
+   */
+  listDeepLinks?(appId: string): Promise<DeepLink[]>;
 
   /** Raw escape hatch (android shell). Policy-gated above. */
   shell?(command: string): Promise<string>;
