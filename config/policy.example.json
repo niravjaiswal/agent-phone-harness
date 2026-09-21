@@ -1,0 +1,31 @@
+{
+  "_comment": "Starting policy. Pass as `policy` to createSession / POST /sessions, or crib fields into phone_session_start.",
+
+  "mode": "guarded",
+
+  "allowedApps": ["com.example.bank"],
+  "blockedApps": ["com.android.settings", "com.apple.Preferences", "com.android.vending:billing"],
+
+  "allowShell": false,
+  "allowInstall": false,
+  "allowClearAppData": false,
+  "allowUrlSchemes": ["https", "http", "tel", "sms", "mailto", "geo", "intent"],
+
+  "_confirmPatterns": "Matching target text routes the action to a human. Case-insensitive regex sources.",
+  "confirmPatterns": [
+    "\\b(pay|paying|payment|pay now)\\b",
+    "\\b(send money|transfer|wire|venmo|zelle)\\b",
+    "\\b(buy|purchase|place order|order now|checkout|check out)\\b",
+    "\\b(subscribe|start (free )?trial|upgrade plan)\\b",
+    "\\b(delete|remove|erase|wipe|deactivate|close account|unsubscribe)\\b",
+    "\\b(confirm|authori[sz]e|approve|accept|agree|i agree|continue to pay)\\b",
+    "\\b(sign out|log ?out)\\b"
+  ],
+
+  "_blockPatterns": "Refused outright, approval or not. Payment card and government ID entry are always refused regardless of this list.",
+  "blockPatterns": [],
+
+  "maxActionsPerSession": 500,
+  "maxSessionMinutes": 60,
+  "redactPasswordFields": true
+}

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "phone": {
+      "command": "node",
+      "args": ["/absolute/path/to/agent-phone-harness/dist/mcp/stdio.js"],
+      "env": {
+        "PHONE_ALLOW_MOCK": "0",
+        "PHONE_WDA_URL": "http://127.0.0.1:8100",
+        "PHONE_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
