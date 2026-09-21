@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "phone": {
-      "command": "node",
-      "args": ["/absolute/path/to/agent-phone-harness/dist/mcp/stdio.js"],
+      "command": "npx",
+      "args": [
+        "-y",
+        "agent-phone-harness",
+        "mcp"
+      ],
       "env": {
         "PHONE_ALLOW_MOCK": "0",
         "PHONE_WDA_URL": "http://127.0.0.1:8100",

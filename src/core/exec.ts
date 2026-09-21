@@ -51,7 +51,7 @@ export const runCommand: Runner = (cmd, args, opts = {}) =>
       child.kill("SIGKILL");
       reject(
         err("timeout", `\`${cmd} ${args.join(" ")}\` timed out after ${timeoutMs}ms`, {
-          hint: "Device may be asleep or disconnected. Try `phone doctor`.",
+          hint: "Device may be asleep or disconnected. Try `agent-phone doctor`.",
         }),
       );
     }, timeoutMs);
@@ -66,7 +66,7 @@ export const runCommand: Runner = (cmd, args, opts = {}) =>
       if (e.code === "ENOENT") {
         reject(
           err("tool_missing", `\`${cmd}\` not found on PATH`, {
-            hint: `Install it, or point the harness at it explicitly. Run \`phone doctor\`.`,
+            hint: `Install it, or point the harness at it explicitly. Run \`agent-phone doctor\`.`,
             cause: e,
           }),
         );

@@ -17,7 +17,7 @@ import type { PolicyMode } from "./core/policy.js";
 const program = new Command();
 
 program
-  .name("phone")
+  .name("agent-phone")
   .description("Give an agent its own phone. Drive Android/iOS from the shell, or expose them over MCP/HTTP.")
   .version("0.1.0")
   .option("--log <level>", "debug|info|warn|error|silent", "info")
@@ -86,7 +86,7 @@ program
     try {
       const devices = await new Harness().listDevices();
       if (!devices.length) {
-        process.stdout.write("no devices found — run `phone doctor`\n");
+        process.stdout.write("no devices found — run `agent-phone doctor`\n");
         return;
       }
       for (const d of devices) {

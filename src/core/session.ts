@@ -1096,7 +1096,7 @@ export class Session {
         hint:
           decided.status === "denied"
             ? "Do not retry. Report the refusal and stop."
-            : `Wait, then retry this call passing approvalId="${req.id}". An operator approves with \`phone approve ${req.id}\`.`,
+            : `Wait, then retry this call passing approvalId="${req.id}". An operator approves with \`agent-phone approve ${req.id}\`.`,
         details: { approvalId: req.id, status: decided.status, summary: req.summary, evidence },
       },
     );

@@ -12,7 +12,7 @@ import { parseWdaSource, WdaClient } from "./wda.js";
 const log = logger("ios");
 
 /** XCUITest's backspace key. */
-const BACKSPACE = "";
+const BACKSPACE = "\u0008";
 
 export interface IosOptions {
   /** WebDriverAgent base URL. Required for perception and input. */
@@ -340,7 +340,7 @@ export class IosProvider implements DeviceProvider {
     const phys = (await this.devicectl.list().catch(() => [])).find((d) => d.udid === udid);
     if (!phys) {
       throw err("device_not_found", `No iOS device or simulator ${udid}`, {
-        hint: "Run `phone devices` to list what the harness can see.",
+        hint: "Run `agent-phone devices` to list what the harness can see.",
       });
     }
     const info: DeviceInfo = {

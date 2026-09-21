@@ -16,7 +16,7 @@ const BANK = "com.example.demobank";
 const out = (s: string) => process.stdout.write(`${s}\n`);
 const step = (n: number, s: string) => out(`\n── ${n}. ${s} ${"─".repeat(Math.max(0, 54 - s.length))}`);
 
-/** Stands in for a human hitting `phone approve <id>` in another terminal. */
+/** Stands in for a human hitting `agent-phone approve <id>` in another terminal. */
 function simulatedOperator(store: ApprovalStore, delayMs = 800): NodeJS.Timeout {
   const timer = setInterval(() => {
     for (const a of store.list({ pendingOnly: true })) {
@@ -90,7 +90,7 @@ export async function runDemo(opts: { autonomous?: boolean } = {}): Promise<void
     const stats = session.stats();
     out(`\nDone. ${stats.actions} actions in ${(stats.uptimeMs / 1000).toFixed(1)}s.`);
     out(`Audit trail: ${stats.tracePath}`);
-    out(`Replay it with: phone trace ${session.id}`);
+    out(`Replay it with: agent-phone trace ${session.id}`);
   } finally {
     if (operator) clearInterval(operator);
     await harness.close(session.id);

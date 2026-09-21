@@ -29,7 +29,7 @@ export interface ApprovalRequest {
 /**
  * Out-of-band human approval for risky actions.
  *
- * File-backed on purpose: an operator running `phone approve <id>` in another
+ * File-backed on purpose: an operator running `agent-phone approve <id>` in another
  * terminal, an HTTP call, or a webhook consumer can all decide, with no daemon
  * and no shared process. Critically, *no MCP tool is wired to `decide`* — an
  * agent cannot approve its own action.
@@ -65,7 +65,7 @@ export class ApprovalStore {
     };
     writeFileSync(this.file(req.id), JSON.stringify(req, null, 2), { mode: 0o600 });
     log.warn(`approval required [${req.id}]: ${req.summary} — ${req.reason}`);
-    log.warn(`approve with: phone approve ${req.id}    deny with: phone deny ${req.id}`);
+    log.warn(`approve with: agent-phone approve ${req.id}    deny with: agent-phone deny ${req.id}`);
     void this.notify(req);
     return req;
   }

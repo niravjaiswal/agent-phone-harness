@@ -250,7 +250,7 @@ export interface Device {
 
 export interface DeviceProvider {
   readonly platform: Platform;
-  /** Tools this provider needs (adb, xcrun...) — used by `phone doctor`. */
+  /** Tools this provider needs (adb, xcrun...) — used by `agent-phone doctor`. */
   requirements(): Promise<{ name: string; ok: boolean; detail: string }[]>;
   listDevices(): Promise<DeviceInfo[]>;
   open(deviceId: string): Promise<Device>;

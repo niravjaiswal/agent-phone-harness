@@ -6,8 +6,7 @@
   "type": "module",
   "engines": { "node": ">=20" },
   "bin": {
-    "phone": "dist/cli.js",
-    "phone-mcp": "dist/mcp/stdio.js"
+    "agent-phone": "dist/cli.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

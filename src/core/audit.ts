@@ -40,7 +40,7 @@ export class AuditLog {
 
   meta(data: Record<string, unknown>): void {
     writeFileSync(join(this.dir, "session.json"), JSON.stringify(data, null, 2));
-    // Open the trace immediately so `phone trace <id>` works even for a session
+    // Open the trace immediately so `agent-phone trace <id>` works even for a session
     // that failed before its first successful action.
     this.record({ kind: "session_start", ok: true, result: { device: data.device, policy: data.policy } });
   }

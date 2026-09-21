@@ -68,7 +68,7 @@ export class SecretStore {
     }
     if (v === undefined) {
       throw err("bad_request", `No secret named "${key}"`, {
-        hint: `Known keys: ${this.keys().join(", ") || "(none)"}. Add one with \`phone secret set ${key}\`.`,
+        hint: `Known keys: ${this.keys().join(", ") || "(none)"}. Add one with \`agent-phone secret set ${key}\`.`,
       });
     }
     return v;

@@ -98,7 +98,7 @@ export class Harness {
       hint:
         "Plug in / `adb connect` an Android device, boot an iOS simulator with WebDriverAgent running, " +
         'or start the session with deviceId "mock:demo" to use the built-in simulated phone. ' +
-        "Run `phone doctor` for a full diagnosis.",
+        "Run `agent-phone doctor` for a full diagnosis.",
       details: { seen: all.map((d) => `${d.id} (${d.state})`) },
     });
   }
