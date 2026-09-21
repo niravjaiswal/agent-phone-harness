@@ -116,7 +116,7 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
     async () =>
       guard(async () => {
         const devices = await harness.listDevices();
-        if (!devices.length) return text("No devices found. Run `phone doctor` on the host for a diagnosis.");
+        if (!devices.length) return text("No devices found. Run `agent-phone doctor` on the host for a diagnosis.");
         return text(
           devices
             .map(
@@ -375,7 +375,7 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
       guard(async () => {
         const { secrets } = await import("../core/secrets.js");
         const keys = secrets.keys();
-        return text(keys.length ? keys.join("\n") : "No secrets configured (`phone secret set <key>` on the host).");
+        return text(keys.length ? keys.join("\n") : "No secrets configured (`agent-phone secret set <key>` on the host).");
       }),
   );
 
