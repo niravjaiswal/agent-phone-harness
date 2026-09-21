@@ -138,6 +138,70 @@ describe("MCP tool surface", () => {
     expect(body.details.approvalId).toMatch(/^[0-9a-f]{8}$/);
   }, 60_000);
 
+  it("advertises batching and deep links", async () => {
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("phone_batch");
+    expect(names).toContain("phone_list_deep_links");
+  });
+
+  it("runs a multi-step batch in one call and ends on a full screen", async () => {
+    const fresh = textOf(
+      await call("phone_session_start", {
+        deviceId: "mock:demo",
+        allowedApps: ["com.example.demobank", "com.mock.launcher"],
+        approvalWaitMs: 1500,
+      }),
+    );
+    const id = /session (\w+) on/.exec(fresh)![1]!;
+
+    const out = textOf(
+      await call("phone_batch", {
+        sessionId: id,
+        steps: [
+          { action: "open_app", appId: "com.example.demobank" },
+          { action: "type", selector: { label: "Username" }, text: "ada@example.com" },
+          { action: "type_secret", selector: { label: "Password" }, key: "mcp_password" },
+          { action: "tap", selector: { text: "Sign in" } },
+        ],
+      }),
+    );
+
+    expect(out).toContain("batch complete: 4/4 steps");
+    expect(out).toContain("Verification code");
+    expect(out).not.toContain("mcp-secret-value");
+    await call("phone_session_end", { sessionId: id });
+  }, 30_000);
+
+  it("reports a partial batch with the failing step and what was skipped", async () => {
+    const fresh = textOf(await call("phone_session_start", { deviceId: "mock:demo", approvalWaitMs: 1500 }));
+    const id = /session (\w+) on/.exec(fresh)![1]!;
+
+    const out = textOf(
+      await call("phone_batch", {
+        sessionId: id,
+        steps: [
+          { action: "open_app", appId: "com.example.demobank" },
+          { action: "tap", selector: { text: "Nonexistent" } },
+          { action: "tap", selector: { text: "Sign in" } },
+        ],
+      }),
+    );
+
+    expect(out).toContain("batch stopped: 1/3 steps");
+    expect(out).toContain("[no_match]");
+    expect(out).toContain("were not attempted");
+    await call("phone_session_end", { sessionId: id });
+  }, 30_000);
+
+  it("lists the deep links an app declares", async () => {
+    const fresh = textOf(await call("phone_session_start", { deviceId: "mock:demo", approvalWaitMs: 1500 }));
+    const id = /session (\w+) on/.exec(fresh)![1]!;
+    const out = textOf(await call("phone_list_deep_links", { sessionId: id, appId: "com.example.demobank" }));
+    expect(out).toContain("demobank://send");
+    await call("phone_session_end", { sessionId: id });
+  });
+
   it("closes the session", async () => {
     const out = textOf(await call("phone_session_end", { sessionId }));
     expect(out).toContain("closed session");
