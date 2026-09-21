@@ -1,0 +1,30 @@
+# A virtual phone in a container. No Android SDK on the host, no emulator, no handset.
+#
+# Redroid runs Android against the host kernel, so it is far lighter than a QEMU
+# emulator and several can share one machine. It needs binder/ashmem kernel
+# modules, which means a Linux host — on macOS or Windows use `agent-phone up`
+# instead, which drives a normal emulator.
+#
+#   docker compose -f docker/compose.yml up -d
+#   adb connect localhost:5555
+#   agent-phone doctor
+#
+# Scale by copying the phone-1 block: bump the published port and the data volume.
+
+services:
+  phone-1:
+    image: redroid/redroid:14.0.0-latest
+    container_name: agent-phone-1
+    privileged: true
+    ports:
+      - "5555:5555"
+    volumes:
+      - phone-1-data:/data
+    command:
+      - androidboot.redroid_width=1080
+      - androidboot.redroid_height=2340
+      - androidboot.redroid_dpi=420
+      - androidboot.redroid_gpu_mode=guest
+
+volumes:
+  phone-1-data:
