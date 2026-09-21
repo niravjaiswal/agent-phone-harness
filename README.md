@@ -185,6 +185,8 @@ await harness.close(session.id);
 | `phone_observe` | element tree with refs — the cheap, precise way to see |
 | `phone_screenshot` | password fields blacked out; `marks:true` for numbered boxes |
 | `phone_tap`, `phone_type`, `phone_key`, `phone_swipe`, `phone_scroll`, `phone_clear_text` | input |
+| `phone_batch` | **several actions in one call — the single biggest saving available** |
+| `phone_list_deep_links` | URLs the app declares; one of these often replaces a whole tap sequence |
 | `phone_type_secret` | types a stored secret; the value never enters your context |
 | `phone_wait_for` | wait for something to appear or disappear |
 | `phone_open_app`, `phone_stop_app`, `phone_list_apps` | app lifecycle |
@@ -194,6 +196,38 @@ await harness.close(session.id);
 | `phone_install_app`, `phone_clear_app_data`, `phone_shell` | privileged; off unless the policy allows |
 
 No tool can approve a gated action. That path is operator-only, by construction.
+
+---
+
+## Driving it efficiently
+
+Three things the harness does so an agent spends fewer turns and fewer device round trips.
+
+**Batch what you can predict.** A login form is five actions and one decision. `phone_batch` runs the
+sequence in a single call, re-resolving each step's selector against a fresh screen so it can never act on
+stale coordinates, stopping at the first failure with exactly what ran and what did not. Measured on the
+demo login flow:
+
+| | agent turns | device dumps | screen chars returned |
+|---|---|---|---|
+| one call per action | 4 | 12 | 2149 |
+| batched, adaptive rendering | **1** | **7** | **460** |
+
+Every step still passes through the policy pipeline, so a batch is not a way around the approval gate — a
+gated step halts the batch and hands back its `approvalId`.
+
+**Settle work is matched to the action.** Typing into a focused field cannot start an animation, so it
+costs one dump; a tap that might navigate gets a stability check; launching an app gets the long timeout.
+Where a provider can cheaply answer "is a transition still running?" (`dumpsys window` on Android) that
+probe ends the wait early — it may only shorten the wait, never shorten the verification.
+
+**The screen is not re-sent when you already have it.** If the tree is byte-identical the result says so
+in one line; a small in-place change sends just the changed elements; navigation or a large change sends
+the whole tree. Batches always end on a full render, because the agent was blind while one ran. Set
+`renderMode: "full"` on the session to opt out.
+
+**When the accessibility tree is empty** — a Flutter, canvas or game surface — the harness says so and
+attaches a screenshot automatically, instead of handing back a blank screen and letting the agent guess.
 
 ---
 
