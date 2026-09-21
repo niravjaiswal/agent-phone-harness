@@ -286,7 +286,11 @@ Natural next backends: a cloud device farm, Redroid/Waydroid containers, Corelli
 ## Development
 
 ```bash
-npm test          # 121 tests, no hardware required
+npm test          # 135 tests, no hardware required
 npm run typecheck
 npm run build
 ```
+
+## License
+
+[Apache-2.0](LICENSE). Contributions are accepted under the same terms.
