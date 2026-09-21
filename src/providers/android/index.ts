@@ -3,12 +3,12 @@ import { err } from "../../core/errors.js";
 import { runCommand, type Runner } from "../../core/exec.js";
 import { logger } from "../../core/logger.js";
 import type {
-  AppInfo, Device, DeviceInfo, DeviceProvider, KeyName, Message,
+  AppInfo, DeepLink, Device, DeviceInfo, DeviceProvider, KeyName, Message,
   NotificationItem, ScreenContext, Screenshot, UiElement,
 } from "../../core/types.js";
 import {
-  Adb, findAdb, parseCurrentApp, parseDensity, parseDevices, parsePackages,
-  parseSmsRows, parseWmSize, shQuote,
+  Adb, findAdb, parseCurrentApp, parseDeepLinks, parseDensity, parseDevices,
+  parsePackages, parseSmsRows, parseTransitionIdle, parseWmSize, shQuote,
 } from "./adb.js";
 import { parseUiAutomatorXml } from "./uiautomator.js";
 
@@ -272,6 +272,28 @@ export class AndroidDevice implements Device {
     if (/Unknown command|Exception/.test(out)) {
       throw err("unsupported", "this Android build does not expose `cmd clipboard`");
     }
+  }
+
+  /**
+   * Ask the window manager whether a transition is still running.
+   *
+   * One cheap shell round trip instead of a full uiautomator dump. The field is
+   * not present on every OEM build, hence the undefined case.
+   */
+  async isIdle(): Promise<boolean | undefined> {
+    const out = await this.adb.shell("dumpsys window | grep -m1 mAppTransitionState", {
+      allowFailure: true,
+      timeoutMs: 8000,
+    });
+    return parseTransitionIdle(out);
+  }
+
+  async listDeepLinks(appId: string): Promise<DeepLink[]> {
+    const dump = await this.adb.shell(`dumpsys package ${shQuote(appId)}`, {
+      allowFailure: true,
+      timeoutMs: 30_000,
+    });
+    return parseDeepLinks(dump);
   }
 
   async shell(command: string): Promise<string> {

@@ -161,3 +161,119 @@ export class Adb {
     }
   }
 }
+
+/**
+ * Parse `dumpsys package <pkg>` for externally launchable entry points.
+ *
+ * Only filters carrying both VIEW and BROWSABLE are usable from outside the
+ * app, which is exactly the set an agent can jump to with `openUrl`.
+ */
+export function parseDeepLinks(dump: string): {
+  scheme: string;
+  host?: string;
+  pathPrefix?: string;
+  example: string;
+  activity?: string;
+}[] {
+  interface Filter {
+    activity?: string;
+    actions: string[];
+    categories: string[];
+    schemes: string[];
+    authorities: string[];
+    paths: string[];
+  }
+  const blank = (activity?: string): Filter => ({
+    ...(activity ? { activity } : {}),
+    actions: [],
+    categories: [],
+    schemes: [],
+    authorities: [],
+    paths: [],
+  });
+
+  const out: {
+    scheme: string;
+    host?: string;
+    pathPrefix?: string;
+    example: string;
+    activity?: string;
+  }[] = [];
+  const seen = new Set<string>();
+
+  const flush = (f: Filter) => {
+    if (!f.actions.some((a) => a.endsWith("action.VIEW"))) return;
+    if (!f.categories.some((c) => c.endsWith("category.BROWSABLE"))) return;
+    for (const scheme of f.schemes.length ? f.schemes : []) {
+      const hosts = f.authorities.length ? f.authorities : [undefined];
+      for (const host of hosts) {
+        const paths = f.paths.length ? f.paths : [undefined];
+        for (const pathPrefix of paths) {
+          const example = `${scheme}://${host ?? ""}${pathPrefix ?? ""}`;
+          const key = `${example}|${f.activity ?? ""}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            scheme,
+            ...(host ? { host } : {}),
+            ...(pathPrefix ? { pathPrefix } : {}),
+            example,
+            ...(f.activity ? { activity: f.activity } : {}),
+          });
+        }
+      }
+    }
+  };
+
+  let current = blank();
+  let activity: string | undefined;
+
+  for (const raw of dump.split("\n")) {
+    const line = raw.trim();
+
+    // "  a1b2c3 com.example/.DeepLinkActivity filter d4e5f6"
+    const header = /^\S*\s*([A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+)\s+filter\s+\S+/.exec(line);
+    if (header) {
+      flush(current);
+      activity = header[1];
+      current = blank(activity);
+      continue;
+    }
+    if (/^filter\s+\S+/.test(line)) {
+      flush(current);
+      current = blank(activity);
+      continue;
+    }
+
+    const kv = /^(Action|Category|Scheme|Authority|Path):\s*"?([^"]*)"?/.exec(line);
+    if (!kv) continue;
+    const [, key, rawValue] = kv;
+    const value = (rawValue ?? "").replace(/:\s*-?\d+$/, "").trim();
+    if (!value) continue;
+
+    if (key === "Action") current.actions.push(value);
+    else if (key === "Category") current.categories.push(value);
+    else if (key === "Scheme") current.schemes.push(value);
+    else if (key === "Authority") current.authorities.push(value);
+    else if (key === "Path") {
+      // Path: "PatternMatcher{PREFIX: /order}"
+      const m = /(?:PREFIX|LITERAL|GLOB|ADVANCED_GLOB|SIMPLE_GLOB)\s*:\s*([^}]*)/.exec(value);
+      const p = (m?.[1] ?? value).trim();
+      if (p.startsWith("/")) current.paths.push(p);
+    }
+  }
+  flush(current);
+  return out;
+}
+
+/**
+ * Is the window manager done animating?
+ *
+ * Purely an optimisation signal: `undefined` means "cannot tell", and callers
+ * must fall back to comparing dumps rather than assuming either answer.
+ */
+export function parseTransitionIdle(dump: string): boolean | undefined {
+  const m = /mAppTransitionState=(\w+)/.exec(dump);
+  if (!m) return undefined;
+  return m[1] === "APP_STATE_IDLE";
+}

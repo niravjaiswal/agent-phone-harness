@@ -3,7 +3,7 @@ import { encodePng, fillRect, strokeRect } from "../../core/image.js";
 import { finalizeElements, type RawElement } from "../../core/elements.js";
 import { err } from "../../core/errors.js";
 import type {
-  AppInfo, Device, DeviceInfo, DeviceProvider, KeyName, Message,
+  AppInfo, DeepLink, Device, DeviceInfo, DeviceProvider, KeyName, Message,
   NotificationItem, Rect, ScreenContext, Screenshot, ScreenshotOptions, UiElement,
 } from "../../core/types.js";
 
@@ -326,6 +326,14 @@ export class MockDevice implements Device {
     this.log.push(`openUrl(${url})`);
     if (url.startsWith("demobank://send")) this.screen = "bank.send";
     else if (url.startsWith("demobank://")) this.screen = "bank.home";
+  }
+
+  async listDeepLinks(appId: string): Promise<DeepLink[]> {
+    if (appId !== BANK) return [];
+    return [
+      { scheme: "demobank", host: "home", example: "demobank://home", activity: `${BANK}/.HomeActivity` },
+      { scheme: "demobank", host: "send", example: "demobank://send", activity: `${BANK}/.SendMoneyActivity` },
+    ];
   }
 
   async currentApp(): Promise<{ app?: string; activity?: string }> {
