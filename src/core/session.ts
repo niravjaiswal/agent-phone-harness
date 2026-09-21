@@ -12,7 +12,7 @@ import {
   type RenderOptions,
 } from "./elements.js";
 import type {
-  Device, Direction, KeyName, Message, NotificationItem, Selector,
+  DeepLink, Device, Direction, KeyName, Message, NotificationItem, Selector,
   Snapshot, Target, UiElement,
 } from "./types.js";
 
@@ -31,6 +31,11 @@ export interface SessionOptions {
   secretStore?: SecretStore;
   approvalStore?: ApprovalStore;
   render?: RenderOptions;
+  /**
+   * "auto" (default) suppresses re-sending a tree the agent already has.
+   * "full" always re-renders — use it if an agent struggles to track state.
+   */
+  renderMode?: "auto" | "full";
 }
 
 export interface ScreenView {
@@ -42,6 +47,14 @@ export interface ScreenView {
   elements: string;
   elementCount: number;
   truncated: boolean;
+  /**
+   * full      — the whole tree, because the screen is new or changed a lot
+   * partial   — only what changed; the rest is identical to the previous render
+   * unchanged — byte-identical to the previous render, so nothing is repeated
+   */
+  mode: "full" | "partial" | "unchanged";
+  /** Accessibility tree was empty — use a screenshot and tap by coordinate. */
+  barren?: boolean;
 }
 
 export interface ActionResult {
@@ -71,6 +84,77 @@ export interface SettleOptions {
   intervalMs?: number;
   /** Consecutive identical dumps required. Default 2. */
   stableCount?: number;
+  /** Let a provider's cheap idle probe end the wait early. Default true. */
+  useIdleProbe?: boolean;
+}
+
+/**
+ * How hard to work at deciding the screen has stopped moving.
+ *
+ * Every dump is an expensive round trip, so paying for a two-dump stability
+ * check after typing a character into an already-focused field is waste. The
+ * profile is derived from what the action can plausibly do to the UI.
+ */
+export type SettleProfile = "none" | "fast" | "full";
+
+const SETTLE_PROFILES: Record<SettleProfile, Required<Omit<SettleOptions, "useIdleProbe">>> = {
+  none: { timeoutMs: 0, intervalMs: 0, stableCount: 1 },
+  fast: { timeoutMs: 1500, intervalMs: 150, stableCount: 2 },
+  full: { timeoutMs: 4000, intervalMs: 250, stableCount: 2 },
+};
+
+/** Text entry mutates a field in place; navigation can take seconds. */
+const PROFILE_BY_ACTION: Record<string, SettleProfile> = {
+  type: "none",
+  type_secret: "none",
+  clear_text: "none",
+  tap: "fast",
+  long_press: "fast",
+  key: "fast",
+  swipe: "fast",
+  scroll: "fast",
+  open_app: "full",
+  open_url: "full",
+  install_app: "full",
+  clear_app_data: "full",
+  stop_app: "full",
+};
+
+
+/** One step of a batch. Mirrors the single-action tools one-for-one. */
+export type BatchStep =
+  | { action: "tap"; ref?: string; selector?: Selector; x?: number; y?: number; durationMs?: number; approvalId?: string }
+  | { action: "type"; text: string; ref?: string; selector?: Selector; submit?: boolean; clear?: boolean }
+  | { action: "type_secret"; key: string; ref?: string; selector?: Selector; submit?: boolean; clear?: boolean }
+  | { action: "key"; key: KeyName }
+  | { action: "clear_text"; ref?: string; selector?: Selector }
+  | { action: "swipe"; fromX: number; fromY: number; toX: number; toY: number; durationMs?: number }
+  | { action: "scroll"; direction: Direction; ref?: string; selector?: Selector; amount?: number }
+  | { action: "wait_for"; textContains?: string; selector?: Selector; gone?: boolean; timeoutMs?: number }
+  | { action: "open_app"; appId: string; approvalId?: string }
+  | { action: "open_url"; url: string; approvalId?: string };
+
+export interface BatchStepResult {
+  index: number;
+  action: string;
+  target?: string;
+  ok: boolean;
+  change?: string;
+  error?: string;
+  code?: string;
+  hint?: string;
+  approvalId?: string;
+}
+
+export interface BatchResult {
+  ok: boolean;
+  completed: number;
+  total: number;
+  steps: BatchStepResult[];
+  /** Index of the step that failed, if any. Later steps were not attempted. */
+  stoppedAt?: number;
+  /** Always a full render: the agent was blind while the batch ran. */
+  screen: ScreenView;
 }
 
 const READ_ONLY_KINDS = new Set<string>(["observe", "screenshot", "read_sms", "read_notifications", "clipboard_get"]);
@@ -91,6 +175,13 @@ export class Session {
   readonly startedAt = Date.now();
 
   private snapshot?: Snapshot;
+  /**
+   * Bumped immediately before every device mutation. A snapshot captured at the
+   * current value therefore postdates the last thing we did to the phone.
+   */
+  private mutationSeq = 0;
+  private snapshotSeq = -1;
+  private snapshotSettled = false;
   private actionCount = 0;
   private closed = false;
   private readonly approvalWaitMs: number;
@@ -98,6 +189,7 @@ export class Session {
   private readonly approvalStore: ApprovalStore;
   private readonly renderOpts: RenderOptions;
   private readonly traceScreenshots: boolean;
+  private readonly renderMode: "auto" | "full";
 
   constructor(readonly device: Device, opts: SessionOptions = {}) {
     this.id = randomUUID().slice(0, 8);
@@ -108,6 +200,7 @@ export class Session {
     this.approvalStore = opts.approvalStore ?? approvals;
     this.renderOpts = opts.render ?? {};
     this.traceScreenshots = opts.traceScreenshots ?? false;
+    this.renderMode = opts.renderMode ?? "auto";
     this.audit.meta({
       sessionId: this.id,
       device: device.info,
@@ -123,6 +216,9 @@ export class Session {
     if (opts.fresh === false && this.snapshot) return this.snapshot;
     const { elements, screen, prunedCount } = await this.device.dumpUi();
     const { kept, prunedCount: extraPruned } = pruneElements(elements, screen);
+    // A Flutter/canvas/game surface yields a near-empty tree. Distinguish that
+    // from "we pruned aggressively" by looking at the raw node count.
+    const rawCount = elements.length + prunedCount;
     const snap: Snapshot = {
       snapshotId: randomUUID().slice(0, 8),
       deviceId: this.device.info.id,
@@ -132,13 +228,25 @@ export class Session {
       prunedCount: prunedCount + extraPruned,
       truncated: false,
       hash: hashElements(kept, screen),
+      barren: kept.length < 3 && rawCount < 8,
     };
     this.snapshot = snap;
+    this.snapshotSeq = this.mutationSeq;
+    this.snapshotSettled = false;
     return snap;
   }
 
   view(snap: Snapshot, opts: ObserveOptions = {}): ScreenView {
-    const rendered = renderElements(snap.elements, snap.screen, {
+    return this.renderView(snap, snap.elements, "full", opts);
+  }
+
+  private renderView(
+    snap: Snapshot,
+    elements: UiElement[],
+    mode: ScreenView["mode"],
+    opts: ObserveOptions = {},
+  ): ScreenView {
+    const rendered = renderElements(elements, snap.screen, {
       ...this.renderOpts,
       ...(opts.maxChars !== undefined ? { maxChars: opts.maxChars } : {}),
       ...(opts.bounds !== undefined ? { bounds: opts.bounds } : {}),
@@ -148,10 +256,39 @@ export class Session {
       app: snap.screen.app,
       activity: snap.screen.activity,
       size: { width: snap.screen.width, height: snap.screen.height },
-      elements: rendered.text,
+      elements:
+        mode === "unchanged"
+          ? "(screen unchanged — the tree from the previous result still applies)"
+          : rendered.text,
       elementCount: snap.elements.length,
       truncated: rendered.truncated,
+      mode,
+      ...(snap.barren ? { barren: true } : {}),
     };
+  }
+
+  /**
+   * Choose how much of the screen to re-send.
+   *
+   * Identical hash means the agent already holds a byte-identical tree, so
+   * repeating it is pure waste. A small in-place change is sent as just the
+   * changed elements. Anything navigational or large gets the full tree —
+   * asking a model to reconstruct a screen from accumulated deltas costs more
+   * turns than it saves in tokens.
+   */
+  private viewForResult(before: Snapshot | undefined, after: Snapshot): ScreenView {
+    if (this.renderMode === "full" || !before) return this.view(after);
+    if (before.hash === after.hash) return this.renderView(after, after.elements, "unchanged");
+
+    const diff = diffSnapshots(before, after);
+    if (diff.appChanged || after.barren) return this.view(after);
+
+    const churn = diff.added.length + diff.removed.length;
+    const changedFraction = after.elements.length ? churn / after.elements.length : 1;
+    if (changedFraction > 0.4 || diff.added.length > 12) return this.view(after);
+    if (!diff.added.length) return this.renderView(after, after.elements, "full");
+
+    return this.renderView(after, diff.added, "partial");
   }
 
   /**
@@ -237,6 +374,28 @@ export class Session {
     }
   }
 
+  /**
+   * A dump, unless the one we already hold is provably still current.
+   *
+   * Reuse requires all three: nothing has touched the device since it was taken,
+   * settle confirmed the screen had stopped moving, and it is very recent. That
+   * keeps the "never tap a stale coordinate" guarantee while removing the
+   * redundant dump between consecutive actions — which, once settle profiles
+   * landed, became the dominant per-action cost.
+   */
+  private async currentSnapshot(maxAgeMs = 400): Promise<Snapshot> {
+    const snap = this.snapshot;
+    if (
+      snap &&
+      this.snapshotSeq === this.mutationSeq &&
+      this.snapshotSettled &&
+      Date.now() - snap.takenAt <= maxAgeMs
+    ) {
+      return snap;
+    }
+    return this.observe();
+  }
+
   private async resolveTargetInner(
     target: Target,
   ): Promise<{ element?: UiElement; point: [number, number]; label: string }> {
@@ -245,7 +404,7 @@ export class Session {
     }
 
     const cached = this.snapshot;
-    const fresh = await this.observe();
+    const fresh = await this.currentSnapshot();
 
     if ("ref" in target) {
       const before = cached?.elements.find((e) => e.ref === target.ref);
@@ -311,6 +470,7 @@ export class Session {
     if (opts.target) {
       const t = await this.resolveTarget(opts.target);
       label = t.label;
+      this.mutationSeq++;
       await this.device.tap(t.point[0], t.point[1]);
       await sleep(250);
     }
@@ -336,6 +496,7 @@ export class Session {
     if (opts.target) {
       const t = await this.resolveTarget(opts.target);
       label = t.label;
+      this.mutationSeq++;
       await this.device.tap(t.point[0], t.point[1]);
       await sleep(250);
     }
@@ -357,6 +518,7 @@ export class Session {
   async clearText(target?: Target): Promise<ActionResult> {
     if (target) {
       const t = await this.resolveTarget(target);
+      this.mutationSeq++;
       await this.device.tap(t.point[0], t.point[1]);
       await sleep(200);
     }
@@ -576,15 +738,199 @@ export class Session {
     let last = "";
     let stable = 0;
     let snap = await this.observe();
+
+    // `none`: one dump is the answer. Typing into a focused field cannot start
+    // an animation worth waiting on.
+    if (need <= 1 || timeoutMs <= 0) {
+      this.snapshotSettled = true;
+      return { settled: true, snapshot: snap };
+    }
+
     for (;;) {
       if (snap.hash === last) stable++;
       else stable = 1;
       last = snap.hash;
-      if (stable >= need) return { settled: true, snapshot: snap };
+      if (stable >= need) {
+        this.snapshotSettled = true;
+        return { settled: true, snapshot: snap };
+      }
+
+      // A provider that can cheaply say "no transition is running" saves a
+      // whole dump. It may only end the wait early, never extend it.
+      if (opts.useIdleProbe !== false && this.device.isIdle) {
+        const idle = await this.device.isIdle().catch(() => undefined);
+        if (idle === true) {
+          this.snapshotSettled = true;
+          return { settled: true, snapshot: snap };
+        }
+      }
+
       if (Date.now() > deadline) return { settled: false, snapshot: snap };
       await sleep(intervalMs);
       snap = await this.observe();
     }
+  }
+
+  /** Settle strictness implied by what the action can do to the screen. */
+  private settleFor(action: string): SettleOptions {
+    return SETTLE_PROFILES[PROFILE_BY_ACTION[action] ?? "full"];
+  }
+
+
+  // ---------------------------------------------------------------- batching
+
+  /**
+   * Run a predictable sequence in one call.
+   *
+   * The win is turns, not safety shortcuts: every step goes through the same
+   * classify -> policy -> execute -> settle pipeline as its single-action
+   * equivalent, and each step re-resolves its selector against a fresh dump, so
+   * a batch cannot blunder on stale coordinates. It stops at the first failure
+   * and hands back what happened plus the screen where it stopped.
+   *
+   * A step needing human approval halts the batch there with its approvalId;
+   * the steps before it were, by definition, ones the policy allowed.
+   */
+  async batch(steps: BatchStep[], opts: { stopOnError?: boolean } = {}): Promise<BatchResult> {
+    this.assertOpen();
+    if (!steps.length) throw err("bad_request", "batch needs at least one step");
+
+    const stopOnError = opts.stopOnError !== false;
+    const results: BatchStepResult[] = [];
+    let stoppedAt: number | undefined;
+
+    for (const [index, step] of steps.entries()) {
+      try {
+        const r = await this.runStep(step);
+        results.push({
+          index,
+          action: step.action,
+          ok: true,
+          ...(r.target ? { target: r.target } : {}),
+          change: r.change,
+        });
+      } catch (e) {
+        const he = e instanceof HarnessError ? e : undefined;
+        results.push({
+          index,
+          action: step.action,
+          ok: false,
+          error: this.secretStore.redact(e instanceof Error ? e.message : String(e)),
+          ...(he?.code ? { code: he.code } : {}),
+          ...(he?.hint ? { hint: he.hint } : {}),
+          ...(typeof he?.details?.approvalId === "string" ? { approvalId: he.details.approvalId } : {}),
+        });
+        if (stopOnError) {
+          stoppedAt = index;
+          break;
+        }
+      }
+    }
+
+    const snap = this.snapshot ?? (await this.observe());
+    const ok = results.every((r) => r.ok);
+    this.audit.record({
+      kind: "batch",
+      ok,
+      args: { steps: steps.map((x) => x.action).join(",") },
+      result: { completed: results.filter((r) => r.ok).length, total: steps.length, stoppedAt },
+    });
+
+    return {
+      ok,
+      completed: results.filter((r) => r.ok).length,
+      total: steps.length,
+      steps: results,
+      ...(stoppedAt !== undefined ? { stoppedAt } : {}),
+      screen: this.view(snap),
+    };
+  }
+
+  private async runStep(step: BatchStep): Promise<ActionResult> {
+    const target = (s: { ref?: string; selector?: Selector; x?: number; y?: number }): Target | undefined => {
+      if (s.ref) return { ref: s.ref };
+      if (s.selector && Object.keys(s.selector).length) return { selector: s.selector };
+      if (s.x !== undefined && s.y !== undefined) return { point: [s.x, s.y] };
+      return undefined;
+    };
+    const required = (s: { ref?: string; selector?: Selector; x?: number; y?: number }): Target => {
+      const t = target(s);
+      if (!t) throw err("bad_request", `step "${step.action}" needs a ref, selector or x+y`);
+      return t;
+    };
+
+    switch (step.action) {
+      case "tap":
+        return this.tap(required(step), {
+          ...(step.durationMs !== undefined ? { durationMs: step.durationMs } : {}),
+          ...(step.approvalId ? { approvalId: step.approvalId } : {}),
+        });
+      case "type": {
+        const t = target(step);
+        return this.type(step.text, {
+          ...(t ? { target: t } : {}),
+          ...(step.submit !== undefined ? { submit: step.submit } : {}),
+          ...(step.clear !== undefined ? { clear: step.clear } : {}),
+        });
+      }
+      case "type_secret": {
+        const t = target(step);
+        return this.typeSecret(step.key, {
+          ...(t ? { target: t } : {}),
+          ...(step.submit !== undefined ? { submit: step.submit } : {}),
+          ...(step.clear !== undefined ? { clear: step.clear } : {}),
+        });
+      }
+      case "key":
+        return this.pressKey(step.key);
+      case "clear_text":
+        return this.clearText(target(step));
+      case "swipe":
+        return this.swipe([step.fromX, step.fromY], [step.toX, step.toY], step.durationMs ?? 300);
+      case "scroll": {
+        const t = target(step);
+        return this.scroll(step.direction, {
+          ...(t ? { target: t } : {}),
+          ...(step.amount !== undefined ? { amount: step.amount } : {}),
+        });
+      }
+      case "wait_for":
+        return this.waitFor(
+          {
+            ...(step.selector ? { selector: step.selector } : {}),
+            ...(step.textContains ? { textContains: step.textContains } : {}),
+            ...(step.gone !== undefined ? { gone: step.gone } : {}),
+          },
+          { ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}) },
+        );
+      case "open_app":
+        return this.openApp(step.appId, { ...(step.approvalId ? { approvalId: step.approvalId } : {}) });
+      case "open_url":
+        return this.openUrl(step.url, { ...(step.approvalId ? { approvalId: step.approvalId } : {}) });
+      default: {
+        const bad = step as { action: string };
+        throw err("bad_request", `unknown batch step "${bad.action}"`);
+      }
+    }
+  }
+
+  /**
+   * Entry points the foreground (or named) app declares.
+   *
+   * Usually the cheapest route to a screen: one `open_url` instead of six taps.
+   */
+  async deepLinks(appId?: string): Promise<DeepLink[]> {
+    this.policy.assertAllowed({ kind: "observe" });
+    if (!this.device.listDeepLinks) {
+      throw err("unsupported", "this provider cannot enumerate deep links", {
+        hint: "Android only for now. You can still call phone_open_url with a link you already know.",
+      });
+    }
+    const app = appId ?? this.snapshot?.screen.app ?? (await this.observe()).screen.app;
+    if (!app) throw err("bad_request", "no app in the foreground; pass appId");
+    const links = await this.device.listDeepLinks(app);
+    this.audit.record({ kind: "list_deep_links", ok: true, args: { app }, result: { count: links.length } });
+    return links;
   }
 
   // ---------------------------------------------------------------- pipeline
@@ -637,6 +983,7 @@ export class Session {
 
     const started = Date.now();
     this.actionCount++;
+    this.mutationSeq++;
     try {
       await run();
     } catch (e) {
@@ -655,7 +1002,7 @@ export class Session {
       if (opts.settle === false) {
         snapshot = await this.observe();
       } else {
-        const r = await this.waitForSettle();
+        const r = await this.waitForSettle(this.settleFor(name));
         settled = r.settled;
         snapshot = r.snapshot;
       }
@@ -773,6 +1120,7 @@ export class Session {
         elements: `(screen unavailable: ${reason})`,
         elementCount: 0,
         truncated: false,
+        mode: "full",
       },
     };
   }
@@ -793,7 +1141,7 @@ export class Session {
       settled,
       changed: diff.changed,
       change: diff.summary,
-      screen: this.view(snapshot),
+      screen: this.viewForResult(before, snapshot),
       ...(data !== undefined ? { data } : {}),
       ...(settled ? {} : { note: "UI was still changing when the settle timeout elapsed" }),
     };
