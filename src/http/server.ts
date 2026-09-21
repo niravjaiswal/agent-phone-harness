@@ -296,6 +296,12 @@ async function action(harness: Harness, sessionId: string, name: string, b: Reco
       return s.clearAppData(String(b.appId ?? ""), approvalId);
     case "shell":
       return s.shell(String(b.command ?? ""), approvalId);
+    case "batch":
+      return s.batch((b.steps ?? []) as never, {
+        ...(typeof b.stopOnError === "boolean" ? { stopOnError: b.stopOnError } : {}),
+      });
+    case "deep_links":
+      return { links: await s.deepLinks(typeof b.appId === "string" ? b.appId : undefined) };
     case "list_apps":
       return { apps: await s.device.listApps() };
     case "read_sms":

@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { HarnessError } from "../core/errors.js";
 import type { Harness } from "../core/harness.js";
-import type { ActionResult, Session } from "../core/session.js";
+import type { ActionResult, BatchStep, Session } from "../core/session.js";
 import type { Direction, KeyName, Selector, Target } from "../core/types.js";
 
 /**
@@ -62,11 +62,25 @@ function optionalTarget(a: { ref?: string; selector?: Selector; x?: number; y?: 
 
 const text = (s: string): CallToolResult => ({ content: [{ type: "text", text: s }] });
 
+const MODE_NOTE: Record<string, string> = {
+  unchanged: "",
+  partial: "\n(only the changed elements are shown; everything else is as in the previous screen)",
+  full: "",
+};
+
+function renderScreen(screen: ActionResult["screen"]): string {
+  const barren = screen.barren
+    ? "\n\nNOTE: this screen exposes almost no accessibility data (a canvas/Flutter/game surface). " +
+      "Element selectors will not work here — call phone_screenshot and tap by x/y coordinates."
+    : "";
+  return `${screen.elements}${screen.truncated ? "\n(tree truncated)" : ""}${MODE_NOTE[screen.mode] ?? ""}${barren}`;
+}
+
 function renderAction(r: ActionResult): string {
   const head = `✓ ${r.action}${r.target ? ` → ${r.target}` : ""}`;
   const meta = [r.change, r.settled ? null : "NOT SETTLED — UI still animating"].filter(Boolean).join(" | ");
   const extra = r.data !== undefined ? `\n\n${JSON.stringify(r.data, null, 2)}` : "";
-  return `${head}\n${meta}\n\n${r.screen.elements}${r.screen.truncated ? "\n(tree truncated)" : ""}${extra}`;
+  return `${head}\n${meta}\n\n${renderScreen(r.screen)}${extra}`;
 }
 
 /** Errors carry a `hint` precisely so an agent can recover without a human. */
@@ -197,6 +211,10 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
         ...sessionShape,
         maxChars: z.number().int().positive().optional().describe("budget for the rendered tree (default 6000)"),
         bounds: z.boolean().optional().describe("include full bounds instead of tap centers"),
+        screenshotOnBarren: z
+          .boolean()
+          .optional()
+          .describe("attach a screenshot automatically when the accessibility tree is empty (default true)"),
       },
     },
     async (a) =>
@@ -207,10 +225,26 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
           ...(a.maxChars !== undefined ? { maxChars: a.maxChars } : {}),
           ...(a.bounds !== undefined ? { bounds: a.bounds } : {}),
         });
-        return text(
-          `${view.elements}\n\n(${view.elementCount} elements shown, ${snap.prunedCount} non-informative pruned` +
-            `${view.truncated ? ", output truncated" : ""})`,
-        );
+        const body =
+          `${renderScreen(view)}\n\n(${view.elementCount} elements shown, ${snap.prunedCount} non-informative pruned` +
+          `${view.truncated ? ", output truncated" : ""})`;
+
+        // A barren tree means selectors are useless, so hand over pixels rather
+        // than letting the agent stare at an empty screen.
+        if (snap.barren && a.screenshotOnBarren !== false) {
+          try {
+            const shot = await s.screenshot({ maxSize: 1000 });
+            return {
+              content: [
+                { type: "text", text: body },
+                { type: "image", data: shot.data.toString("base64"), mimeType: "image/png" },
+              ],
+            };
+          } catch {
+            /* fall through to text-only */
+          }
+        }
+        return text(body);
       }),
   );
 
@@ -523,6 +557,104 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
       guard(async () =>
         text(renderAction(await S(a.sessionId).shell(a.command, { ...(a.approvalId ? { approvalId: a.approvalId } : {}) }))),
       ),
+  );
+
+  server.registerTool(
+    "phone_batch",
+    {
+      description:
+        "Run several actions in one call. Use this whenever you can predict two or more steps ahead — " +
+        "filling a login form, stepping through a wizard, entering an OTP then submitting. It is the single " +
+        "biggest saving available to you: five separate tool calls become one.\n\n" +
+        "Each step re-resolves its own selector against a fresh screen, so a batch never acts on stale " +
+        "coordinates. Execution stops at the first failure and you get back exactly which steps ran, what " +
+        "failed and why, plus the full screen where it stopped. If a step needs human approval the batch " +
+        "halts there and hands you the approvalId.\n\n" +
+        "Do not batch steps you cannot predict — if you need to see a screen before deciding, stop the batch there.",
+      inputSchema: {
+        ...sessionShape,
+        steps: z
+          .array(
+            z.object({
+              action: z.enum([
+                "tap", "type", "type_secret", "key", "clear_text",
+                "swipe", "scroll", "wait_for", "open_app", "open_url",
+              ]),
+              ref: z.string().optional(),
+              selector: selectorSchema.optional(),
+              x: z.number().optional(),
+              y: z.number().optional(),
+              text: z.string().optional().describe("for type"),
+              key: z.string().optional().describe("secret name for type_secret, or key name for key"),
+              submit: z.boolean().optional(),
+              clear: z.boolean().optional(),
+              durationMs: z.number().optional(),
+              direction: z.enum(["up", "down", "left", "right"]).optional().describe("for scroll"),
+              amount: z.number().optional(),
+              fromX: z.number().optional(), fromY: z.number().optional(),
+              toX: z.number().optional(), toY: z.number().optional(),
+              textContains: z.string().optional().describe("for wait_for"),
+              gone: z.boolean().optional(),
+              timeoutMs: z.number().optional(),
+              appId: z.string().optional().describe("for open_app"),
+              url: z.string().optional().describe("for open_url"),
+              approvalId: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .max(20),
+        stopOnError: z.boolean().optional().describe("default true; false runs every step regardless"),
+      },
+    },
+    async (a) =>
+      guard(async () => {
+        const steps = a.steps.map((raw) => {
+          const step = { ...raw } as Record<string, unknown>;
+          // `key` carries a secret name for type_secret and a key name for key.
+          if (raw.action === "key") step.key = raw.key;
+          return step;
+        }) as unknown as BatchStep[];
+
+        const r = await S(a.sessionId).batch(steps, {
+          ...(a.stopOnError !== undefined ? { stopOnError: a.stopOnError } : {}),
+        });
+
+        const lines = r.steps.map((st) => {
+          const head = `${st.ok ? "✓" : "✗"} ${st.index}. ${st.action}${st.target ? ` → ${st.target}` : ""}`;
+          if (st.ok) return `${head}${st.change ? `  (${st.change})` : ""}`;
+          return `${head}\n     ${st.code ? `[${st.code}] ` : ""}${st.error}${st.hint ? `\n     hint: ${st.hint}` : ""}` +
+            `${st.approvalId ? `\n     approvalId: ${st.approvalId}` : ""}`;
+        });
+        const summary =
+          `${r.ok ? "batch complete" : "batch stopped"}: ${r.completed}/${r.total} steps` +
+          `${r.stoppedAt !== undefined ? ` (stopped at step ${r.stoppedAt})` : ""}`;
+        const remaining =
+          r.stoppedAt !== undefined
+            ? `\n\n${r.total - r.completed} step(s) were not attempted. Re-send them once the problem above is resolved.`
+            : "";
+        return text(`${summary}\n${lines.join("\n")}${remaining}\n\n${renderScreen(r.screen)}`);
+      }),
+  );
+
+  server.registerTool(
+    "phone_list_deep_links",
+    {
+      description:
+        "List the URLs an app declares as entry points. Opening one with phone_open_url usually replaces a " +
+        "whole sequence of taps, so check here before navigating by hand. Android only. " +
+        "Paths may need a real id substituted; if a link does not land where you expect, fall back to tapping.",
+      inputSchema: { ...sessionShape, appId: z.string().optional().describe("defaults to the foreground app") },
+    },
+    async (a) =>
+      guard(async () => {
+        const links = await S(a.sessionId).deepLinks(a.appId);
+        if (!links.length) return text("This app declares no externally launchable deep links.");
+        return text(
+          links
+            .map((l) => `${l.example}${l.activity ? `    → ${l.activity}` : ""}`)
+            .join("\n"),
+        );
+      }),
   );
 
   // ------------------------------------------------------------- side channels
