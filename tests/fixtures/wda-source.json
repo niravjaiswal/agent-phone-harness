@@ -1,0 +1,68 @@
+{
+  "type": "XCUIElementTypeApplication",
+  "name": "Bank",
+  "label": "Bank",
+  "rect": { "x": 0, "y": 0, "width": 393, "height": 852 },
+  "isEnabled": "true",
+  "isVisible": "1",
+  "children": [
+    {
+      "type": "XCUIElementTypeWindow",
+      "rect": { "x": 0, "y": 0, "width": 393, "height": 852 },
+      "isEnabled": "true",
+      "children": [
+        {
+          "type": "XCUIElementTypeStaticText",
+          "name": "title",
+          "label": "Welcome back",
+          "rect": { "x": 16, "y": 80, "width": 361, "height": 40 },
+          "isEnabled": "true",
+          "children": []
+        },
+        {
+          "type": "XCUIElementTypeTextField",
+          "name": "emailField",
+          "label": "Email address",
+          "value": "ada@example.com",
+          "rect": { "x": 16, "y": 140, "width": 361, "height": 44 },
+          "isEnabled": "true",
+          "children": []
+        },
+        {
+          "type": "XCUIElementTypeSecureTextField",
+          "name": "passwordField",
+          "label": "Password",
+          "value": null,
+          "rect": { "x": 16, "y": 200, "width": 361, "height": 44 },
+          "isEnabled": "true",
+          "children": []
+        },
+        {
+          "type": "XCUIElementTypeSwitch",
+          "name": "rememberSwitch",
+          "label": "Remember this device",
+          "value": "1",
+          "rect": { "x": 300, "y": 260, "width": 60, "height": 32 },
+          "isEnabled": "true",
+          "children": []
+        },
+        {
+          "type": "XCUIElementTypeButton",
+          "name": "signInButton",
+          "label": "Sign in",
+          "rect": { "x": 16, "y": 320, "width": 361, "height": 48 },
+          "isEnabled": "true",
+          "children": []
+        },
+        {
+          "type": "XCUIElementTypeButton",
+          "name": "disabledButton",
+          "label": "Later",
+          "rect": { "x": 16, "y": 390, "width": 361, "height": 48 },
+          "isEnabled": "false",
+          "children": []
+        }
+      ]
+    }
+  ]
+}
