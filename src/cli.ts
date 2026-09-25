@@ -8,6 +8,12 @@ import { Harness } from "./core/harness.js";
 import { setLogLevel, type LogLevel } from "./core/logger.js";
 import { paths } from "./core/paths.js";
 import { secrets } from "./core/secrets.js";
+import { ensureServerCredentials, loadConfig, updateConfigFile } from "./core/config.js";
+import { mintLoginCode } from "./core/login-codes.js";
+import { inbox } from "./core/messages/index.js";
+import { notifyOperator } from "./core/notify.js";
+import { readRuntime } from "./core/runtime.js";
+import { VERSION } from "./version.js";
 import { AndroidProvider } from "./providers/android/index.js";
 import { VirtualPhoneManager, DEFAULT_AVD } from "./virtual/index.js";
 import type { Session } from "./core/session.js";
@@ -19,7 +25,7 @@ const program = new Command();
 program
   .name("agent-phone")
   .description("Give an agent its own phone. Drive Android/iOS from the shell, or expose them over MCP/HTTP.")
-  .version("0.1.0")
+  .version(VERSION)
   .option("--log <level>", "debug|info|warn|error|silent", "info")
   .hook("preAction", (cmd) => setLogLevel((cmd.opts().log as LogLevel) ?? "info"));
 
@@ -328,14 +334,16 @@ targetOptions(program.command("apps").description("List installed apps"))
     }
   });
 
-targetOptions(program.command("sms").description("Read recent SMS"))
+targetOptions(program.command("sms").description("Read recent messages from the device and every connected source"))
   .option("--limit <n>", "how many", "10")
   .action(async (o) => {
     try {
       await withSession(o, async (s) => {
-        for (const m of await s.readSms({ limit: Number(o.limit) })) {
-          process.stdout.write(`[${new Date(m.timestamp).toISOString()}] ${m.from}: ${m.body}\n`);
+        const r = await s.readMessages({ limit: Number(o.limit) });
+        for (const m of r.messages) {
+          process.stdout.write(`[${new Date(m.receivedAt).toISOString()}] (${m.origin}) ${m.from}: ${m.body}\n`);
         }
+        for (const e of r.errors) process.stderr.write(`could not read ${e.source}: ${e.error}\n`);
       });
     } catch (e) {
       die(e);
@@ -345,7 +353,7 @@ targetOptions(program.command("sms").description("Read recent SMS"))
 targetOptions(program.command("otp").description("Wait for a one-time code and print it"))
   .option("--from <s>", "filter by sender")
   .option("--body <s>", "filter by message content")
-  .option("--digits <n>", "code length", "6")
+  .option("--digits <n>", "exact code length, if known")
   .option("--timeout <ms>", "how long to wait", "60000")
   .action(async (o) => {
     try {
@@ -353,7 +361,7 @@ targetOptions(program.command("otp").description("Wait for a one-time code and p
         const r = await s.waitForOtp({
           ...(o.from ? { fromContains: o.from } : {}),
           ...(o.body ? { bodyContains: o.body } : {}),
-          digits: Number(o.digits),
+          ...(o.digits ? { digits: Number(o.digits) } : {}),
           timeoutMs: Number(o.timeout),
         });
         process.stdout.write(`${r.code}\n`);
@@ -377,7 +385,7 @@ program
     }
     for (const a of list) {
       process.stdout.write(
-        `${a.id}  ${a.status.padEnd(9)} session=${a.sessionId}  ${a.summary}\n` +
+        `${a.id}  ${a.status.padEnd(9)} ${a.type === "handoff" ? "HANDOFF " : ""}session=${a.sessionId}  ${a.summary}\n` +
           `        reason: ${a.reason}\n` +
           (a.evidence ? `        evidence: ${a.evidence}\n` : ""),
       );
@@ -386,7 +394,7 @@ program
 
 program
   .command("approve <id>")
-  .description("Approve a gated action (operator only — agents cannot call this)")
+  .description("Approve a gated action, or mark a handoff done (operator only — agents cannot call this)")
   .option("--note <text>", "note recorded in the audit trail")
   .action((id: string, o) => {
     const r = approvals.decide(id, true, process.env.USER ?? "operator", o.note);
@@ -455,15 +463,175 @@ program
 
 // ------------------------------------------------------------------ servers
 
+/** Where a human should point a browser: the public URL if there is one, else local. */
+function serverBase(): string | undefined {
+  const rt = readRuntime();
+  return loadConfig().publicUrl ?? rt?.publicUrl ?? rt?.localUrl;
+}
+
+function connectionBlock(base: string, agentToken: string, panelLink: string): string {
+  const prompt =
+    `You have an Android phone you can control. Its API is at ${base} and your token is ${agentToken}. ` +
+    `Before using it, fetch ${base}/agent.md and follow those instructions. Send the token as ` +
+    "`Authorization: Bearer <token>` on every request.";
+  const rule = "─".repeat(64);
+  return [
+    "",
+    "  Operator panel (one-time sign-in link, valid 15 minutes):",
+    `    ${panelLink}`,
+    "",
+    "  Give your agent — MCP clients:",
+    `    URL     ${base}/mcp`,
+    `    Header  Authorization: Bearer ${agentToken}`,
+    "",
+    "  Give your agent — Instinct and other browsing/scripting agents, paste this:",
+    `  ${rule}`,
+    prompt.replace(/(.{1,90})(\s|$)/g, "  $1\n").trimEnd(),
+    `  ${rule}`,
+    "",
+    "  The agent token is safe to give an agent. Never give it the operator token",
+    "  (`agent-phone token` shows both).",
+    "",
+  ].join("\n");
+}
+
 program
   .command("serve")
-  .description("Run the HTTP + MCP-over-HTTP server")
+  .description("Run the HTTP server: operator panel, MCP over HTTP, REST, SMS webhooks")
   .option("-p, --port <n>", "port", "8712")
-  .option("--host <h>", "bind address (non-loopback requires PHONE_API_TOKEN)", "127.0.0.1")
+  .option("--host <h>", "bind address", "127.0.0.1")
+  .option("--public", "expose it on a public HTTPS URL through a Cloudflare tunnel, so cloud agents can reach it")
+  .option("--public-url <url>", "the public URL, if you already route one here (named tunnel, reverse proxy)")
+  .option("--no-auth", "no tokens at all — loopback only, for local development")
   .option("--mock", "allow the built-in mock phone")
   .action(async (o) => {
-    const { serve } = await import("./http/server.js");
-    await serve({ port: Number(o.port), host: o.host, allowMockFallback: Boolean(o.mock) });
+    try {
+      const { serve } = await import("./http/server.js");
+      const s = await serve({
+        port: Number(o.port),
+        host: o.host,
+        allowMockFallback: Boolean(o.mock),
+        ...(o.auth === false ? { auth: false } : {}),
+        ...(o.publicUrl ? { publicUrl: o.publicUrl } : {}),
+        android: { useAdbKeyboard: process.env.PHONE_ADB_KEYBOARD === "1" },
+      });
+      let stopTunnel: (() => void) | undefined;
+      if (o.public) {
+        if (o.auth === false) die(new HarnessError("bad_request", "--public requires authentication; drop --no-auth"));
+        const { startTunnel } = await import("./http/tunnel.js");
+        process.stderr.write("starting a Cloudflare tunnel…\n");
+        const t = await startTunnel(s.localUrl);
+        stopTunnel = t.stop;
+        if (t.url) s.setPublicUrl(t.url);
+      }
+      const base = s.publicUrl() ?? s.localUrl;
+      if (s.agentToken) {
+        process.stdout.write(connectionBlock(base, s.agentToken, `${base}/panel/#code=${mintLoginCode()}`));
+        if (!o.public && !s.publicUrl()) {
+          process.stdout.write(
+            "\n  This address only works on this machine. Add --public to reach it from a cloud agent.\n\n",
+          );
+        }
+      } else {
+        process.stdout.write(`\n  No authentication. Panel: ${base}/panel/   MCP: ${base}/mcp\n\n`);
+      }
+      const shutdown = async () => {
+        stopTunnel?.();
+        await s.close().catch(() => {});
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+    } catch (e) {
+      die(e);
+    }
+  });
+
+program
+  .command("connect-info")
+  .description("Print how to connect an agent and sign in to the panel, for a server that is already running")
+  .option("--wait <seconds>", "wait this long for a public URL to appear (tunnels take a few seconds)", "0")
+  .action(async (o) => {
+    const deadline = Date.now() + Number(o.wait) * 1000;
+    let base = serverBase();
+    while ((!base || base.startsWith("http://127.")) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1000));
+      base = serverBase();
+    }
+    if (!base) die(new HarnessError("bad_request", "No running server found", { hint: "Start one with `agent-phone serve`." }));
+    try {
+      const c = ensureServerCredentials();
+      process.stdout.write(connectionBlock(base, c.agentToken, `${base}/panel/#code=${mintLoginCode()}`));
+    } catch (e) {
+      die(e);
+    }
+  });
+
+program
+  .command("panel-link")
+  .description("Print a one-time sign-in link for the operator panel")
+  .option("--base <url>", "server URL, if it cannot be detected")
+  .action((o) => {
+    const base = o.base ?? serverBase();
+    if (!base) die(new HarnessError("bad_request", "No running server found", { hint: "Start one with `agent-phone serve`, or pass --base." }));
+    process.stdout.write(`${base}/panel/#code=${mintLoginCode()}\n`);
+  });
+
+program
+  .command("token")
+  .description("Show the agent and operator tokens (creating them on first use)")
+  .action(() => {
+    try {
+      const c = ensureServerCredentials();
+      process.stdout.write(
+        `agent token     ${c.agentToken}\n    give this to your agent\n` +
+          `operator token  ${c.operatorToken}\n    for you only — it approves the agent's actions\n`,
+      );
+    } catch (e) {
+      die(e);
+    }
+  });
+
+program
+  .command("identity")
+  .description("Set the number and email the agent should give when a form asks")
+  .option("--number <e164>", "e.g. +15551234567")
+  .option("--email <address>")
+  .action((o) => {
+    const c = updateConfigFile((x) => {
+      if (o.number !== undefined) x.identity.phoneNumber = o.number || undefined;
+      if (o.email !== undefined) x.identity.email = o.email || undefined;
+    });
+    process.stdout.write(`number: ${c.identity.phoneNumber ?? "(none)"}\nemail:  ${c.identity.email ?? "(none)"}\n`);
+  });
+
+const inboxCmd = program.command("inbox").description("Messages delivered by webhooks (SMS providers, relay phones)");
+inboxCmd
+  .command("list", { isDefault: true })
+  .option("--limit <n>", "how many", "20")
+  .action((o) => {
+    const list = inbox.list({ limit: Number(o.limit) });
+    if (!list.length) process.stdout.write("empty\n");
+    for (const m of list) {
+      process.stdout.write(`[${new Date(m.receivedAt).toISOString()}] (${m.origin}) ${m.from}: ${m.body}\n`);
+    }
+  });
+inboxCmd
+  .command("add <body>")
+  .description("Drop a test message in, as if a provider had delivered it")
+  .option("--from <sender>", "sender", "Test")
+  .action((body: string, o) => {
+    const m = inbox.add({ id: `test-${Date.now()}`, origin: "test", from: o.from, body, timestamp: Date.now() });
+    process.stdout.write(m ? "added\n" : "duplicate\n");
+  });
+
+program
+  .command("notify-test")
+  .description("Send a test notification to every configured channel")
+  .action(async () => {
+    const results = await notifyOperator({ kind: "test", title: "agent-phone test", body: "Notifications are working.", path: "/panel/" });
+    if (!results.length) process.stdout.write("no channels configured (panel → Setup → Notifications)\n");
+    for (const r of results) process.stdout.write(`${r.channel.padEnd(9)} ${r.ok ? "sent" : `FAILED: ${r.error}`}\n`);
   });
 
 program
