@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>agent-phone</title>
+<link rel="stylesheet" href="/panel/app.css">
+<script src="/panel/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true"></span>agent-phone</div>
+  <div class="status" id="status" title="Live updates"><span class="dot"></span><span id="status-text">connecting</span></div>
+</header>
+<nav class="tabs" id="tabs" hidden>
+  <a href="#/" data-tab="phone">Phone</a>
+  <a href="#/approvals" data-tab="approvals">Approvals<span class="badge" id="badge" hidden></span></a>
+  <a href="#/activity" data-tab="activity">Activity</a>
+  <a href="#/connect" data-tab="connect">Connect agent</a>
+  <a href="#/setup" data-tab="setup">Setup</a>
+</nav>
+<main id="app" aria-live="polite"></main>
+<div class="toasts" id="toasts" role="status"></div>
+<noscript>The operator panel needs JavaScript.</noscript>
+</body>
+</html>
