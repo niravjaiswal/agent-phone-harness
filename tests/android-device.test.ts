@@ -76,7 +76,8 @@ describe("AndroidProvider", () => {
 
   it("reports adb as missing in doctor output rather than throwing", async () => {
     const run: Runner = async () => ok("");
-    const checks = await new AndroidProvider(run).requirements();
+    // No adb anywhere on disk — CI runners ship an Android SDK, so don't ask the real filesystem.
+    const checks = await new AndroidProvider(run, { fileExists: () => false }).requirements();
     expect(checks[0]!.name).toBe("adb");
     expect(checks[0]!.detail).toContain("android-platform-tools");
   });

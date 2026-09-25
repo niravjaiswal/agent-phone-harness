@@ -4,9 +4,16 @@ import { join } from "node:path";
 import { runCommand, which, type ExecResult, type Runner } from "../../core/exec.js";
 import { err } from "../../core/errors.js";
 
-/** Locate adb without assuming a particular install method. */
-export async function findAdb(run: Runner = runCommand): Promise<string | null> {
-  if (process.env.PHONE_ADB && existsSync(process.env.PHONE_ADB)) return process.env.PHONE_ADB;
+/**
+ * Locate adb without assuming a particular install method.
+ * `exists` is the filesystem probe; tests pass one so the answer does not
+ * depend on whether the machine running them happens to have an SDK.
+ */
+export async function findAdb(
+  run: Runner = runCommand,
+  exists: (path: string) => boolean = existsSync,
+): Promise<string | null> {
+  if (process.env.PHONE_ADB && exists(process.env.PHONE_ADB)) return process.env.PHONE_ADB;
   const sdk = process.env.ANDROID_SDK_ROOT ?? process.env.ANDROID_HOME;
   const candidates = [
     sdk ? join(sdk, "platform-tools", "adb") : null,
@@ -15,7 +22,7 @@ export async function findAdb(run: Runner = runCommand): Promise<string | null> 
     "/usr/local/bin/adb",
     "/opt/homebrew/bin/adb",
   ].filter((x): x is string => Boolean(x));
-  for (const c of candidates) if (existsSync(c)) return c;
+  for (const c of candidates) if (exists(c)) return c;
   return which("adb", run);
 }
 

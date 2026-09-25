@@ -37,6 +37,8 @@ export interface AndroidOptions {
    * Required for non-ASCII input; see README for the one-time setup.
    */
   useAdbKeyboard?: boolean;
+  /** Filesystem probe used to locate adb. Defaults to the real filesystem; tests override it. */
+  fileExists?: (path: string) => boolean;
 }
 
 export class AndroidDevice implements Device {
@@ -346,7 +348,7 @@ export class AndroidProvider implements DeviceProvider {
 
   private async resolveAdb(): Promise<string> {
     if (this.adbPath) return this.adbPath;
-    const p = await findAdb(this.run);
+    const p = await findAdb(this.run, this.opts.fileExists);
     if (!p) {
       throw err("tool_missing", "adb not found", {
         hint: "brew install --cask android-platform-tools, or set PHONE_ADB=/path/to/adb",
@@ -357,7 +359,7 @@ export class AndroidProvider implements DeviceProvider {
   }
 
   async requirements() {
-    const p = await findAdb(this.run).catch(() => null);
+    const p = await findAdb(this.run, this.opts.fileExists).catch(() => null);
     return [
       {
         name: "adb",
