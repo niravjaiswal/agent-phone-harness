@@ -113,6 +113,7 @@ describe("MCP tool surface", () => {
     await call("phone_tap", { sessionId, selector: { text: "Sign in" } });
     const out = textOf(await call("phone_wait_for_otp", { sessionId, digits: 6, timeoutMs: 8000 }));
     expect(out).toMatch(/code: \d{6}/);
+    expect(out).toContain("via device-sms");
     otpCode = /code: (\d{6})/.exec(out)![1]!;
   });
 
@@ -207,6 +208,17 @@ describe("MCP tool surface", () => {
     const out = textOf(await call("phone_list_deep_links", { sessionId: id, appId: "com.example.demobank" }));
     expect(out).toContain("demobank://send");
     await call("phone_session_end", { sessionId: id });
+  });
+
+  it("hands off to a human and resumes when they hand back", async () => {
+    const { approvals } = await import("../src/core/approvals.js");
+    const first = textOf(await call("phone_request_human", { sessionId, reason: "Solve the CAPTCHA", waitSeconds: 1 }));
+    expect(first).toContain("pending");
+    const id = /handoffId="(\w+)"/.exec(first)![1]!;
+    expect(first).toContain("Call phone_request_human again");
+    approvals.decide(id, true, "test", "solved");
+    const second = textOf(await call("phone_request_human", { sessionId, reason: "", handoffId: id, waitSeconds: 2 }));
+    expect(second).toContain("done — the human finished: solved");
   });
 
   it("closes the session", async () => {
