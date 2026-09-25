@@ -89,6 +89,34 @@ export class SecretStore {
     this.values.set(key.toLowerCase(), value);
   }
 
+  /** Remove a file-backed secret. Env-provided secrets can only be removed from the environment. */
+  delete(key: string): boolean {
+    const k = key.toLowerCase();
+    if (!existsSync(this.file)) return false;
+    let existing: Record<string, string> = {};
+    try {
+      existing = JSON.parse(readFileSync(this.file, "utf8")) as Record<string, string>;
+    } catch {
+      return false;
+    }
+    if (!(k in existing)) return false;
+    delete existing[k];
+    writeFileSync(this.file, JSON.stringify(existing, null, 2), { mode: 0o600 });
+    this.reload();
+    return true;
+  }
+
+  /** Key names with where each came from — the panel shows env secrets as read-only. */
+  describe(): { key: string; from: "env" | "file" }[] {
+    this.reload();
+    const env = new Set(
+      Object.keys(process.env)
+        .filter((k) => k.startsWith("PHONE_SECRET_") && process.env[k])
+        .map((k) => k.slice("PHONE_SECRET_".length).toLowerCase()),
+    );
+    return [...this.values.keys()].sort().map((key) => ({ key, from: env.has(key) ? "env" : "file" }));
+  }
+
   /** Scrub every known secret value out of arbitrary text before it is logged or returned. */
   redact(text: string): string {
     let out = text;

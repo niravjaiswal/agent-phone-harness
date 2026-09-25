@@ -2,6 +2,7 @@ import { ApprovalStore, approvals as defaultApprovals } from "./core/approvals.j
 import { Harness } from "./core/harness.js";
 import { SecretStore } from "./core/secrets.js";
 import { HarnessError } from "./core/errors.js";
+import { DeviceSmsSource, NotificationSource } from "./core/messages/index.js";
 
 /**
  * End-to-end demo on the built-in mock phone.
@@ -32,12 +33,16 @@ export async function runDemo(opts: { autonomous?: boolean } = {}): Promise<void
   process.env.PHONE_SECRET_DEMO_PASSWORD = "correct-horse-battery-staple";
   const secretStore = new SecretStore("/nonexistent-demo-secrets.json");
 
-  const harness = new Harness({ allowMockFallback: true });
+  // The demo drives only the simulated phone, so it pins its own ceiling
+  // instead of inheriting the operator's policy.json.
+  const harness = new Harness({ allowMockFallback: true, ceiling: { mode: opts.autonomous ? "autonomous" : "guarded" } });
   const session = await harness.createSession({
     deviceId: "mock:demo",
     secretStore,
     approvalStore: defaultApprovals,
     approvalWaitMs: 15_000,
+    // Only the phone itself — never the operator's real mailbox or number.
+    messageSources: (d) => [new DeviceSmsSource(d), new NotificationSource(d)],
     policy: {
       mode: opts.autonomous ? "autonomous" : "guarded",
       allowedApps: [BANK, "com.mock.launcher", "com.mock.messages"],
@@ -63,12 +68,16 @@ export async function runDemo(opts: { autonomous?: boolean } = {}): Promise<void
     step(4, "sign in — this triggers the SMS one-time code");
     out(short(await session.tap({ selector: { text: "Sign in" } })));
 
-    step(5, "collect the one-time code from SMS, without a human");
-    const otp = await session.waitForOtp({ digits: 6, bodyContains: "verification code", timeoutMs: 10_000 });
-    out(`   code: ${otp.code}  (from ${"from" in otp.message ? otp.message.from : otp.message.pkg})`);
+    step(5, "collect the one-time code from SMS and type it — the model never sees it");
+    const otp = await session.waitForOtp({
+      bodyContains: "verification code",
+      timeoutMs: 10_000,
+      enter: true,
+      target: { selector: { label: "Verification code" } },
+    });
+    out(`   entered a code from ${otp.message.from} (${otp.message.origin})`);
 
-    step(6, "enter the code and verify");
-    await session.type(otp.code, { target: { selector: { label: "Verification code" } } });
+    step(6, "verify");
     out(short(await session.tap({ selector: { text: "Verify" } })));
 
     step(7, 'tap "Send money" — risky wording, so the harness gates it');

@@ -8,6 +8,9 @@ import { logger } from "./logger.js";
 import { Policy, type ActionDescriptor, type PolicyConfig } from "./policy.js";
 import { secrets, type SecretStore } from "./secrets.js";
 import {
+  collectMessages, defaultSources, findOtp, type InboundMessage, type MessageSource,
+} from "./messages/index.js";
+import {
   diffSnapshots, hashElements, pruneElements, renderElements, resolveSelector,
   type RenderOptions,
 } from "./elements.js";
@@ -36,6 +39,8 @@ export interface SessionOptions {
    * "full" always re-renders — use it if an agent struggles to track state.
    */
   renderMode?: "auto" | "full";
+  /** Where one-time codes can arrive. Defaults to device SMS + notifications + webhook inbox + IMAP. */
+  messageSources?: (device: Device) => MessageSource[];
 }
 
 export interface ScreenView {
@@ -173,6 +178,8 @@ export class Session {
   readonly policy: Policy;
   readonly audit: AuditLog;
   readonly startedAt = Date.now();
+  /** Things the agent should know about how its session was set up (e.g. policy it asked for but did not get). */
+  readonly notes: string[] = [];
 
   private snapshot?: Snapshot;
   /**
@@ -190,6 +197,21 @@ export class Session {
   private readonly renderOpts: RenderOptions;
   private readonly traceScreenshots: boolean;
   private readonly renderMode: "auto" | "full";
+  private readonly sourcesFor?: (device: Device) => MessageSource[];
+  /** Messages whose code was already handed out — a retry must get a fresh code, not the stale one. */
+  private readonly consumed = new Set<string>();
+  /**
+   * Codes already handed out, with when their message arrived. The same SMS
+   * often shows up twice — once from the SMS store, once from the notification
+   * shade — under different ids.
+   */
+  private readonly consumedCodes = new Map<string, number>();
+  /**
+   * One-time codes typed on the agent's behalf. Hidden wherever a field shows
+   * exactly that value — the whole point of entering it for the agent is that
+   * the code never lands in the model's context or its provider's logs.
+   */
+  private readonly hiddenValues = new Set<string>();
 
   constructor(readonly device: Device, opts: SessionOptions = {}) {
     this.id = randomUUID().slice(0, 8);
@@ -201,6 +223,7 @@ export class Session {
     this.renderOpts = opts.render ?? {};
     this.traceScreenshots = opts.traceScreenshots ?? false;
     this.renderMode = opts.renderMode ?? "auto";
+    this.sourcesFor = opts.messageSources;
     this.audit.meta({
       sessionId: this.id,
       device: device.info,
@@ -208,6 +231,15 @@ export class Session {
       startedAt: this.startedAt,
     });
     log.info(`session ${this.id} on ${device.info.id} (${this.policy.config.mode})`);
+  }
+
+  /**
+   * Forget the cached screen. Called when something outside this session — a
+   * human in the panel — may have changed the device.
+   */
+  invalidateSnapshot(): void {
+    this.mutationSeq++;
+    this.snapshotSettled = false;
   }
 
   // ---------------------------------------------------------------- perception
@@ -256,10 +288,12 @@ export class Session {
       app: snap.screen.app,
       activity: snap.screen.activity,
       size: { width: snap.screen.width, height: snap.screen.height },
+      // A secret typed into an ordinary field comes straight back in the next
+      // tree as the field's text; scrub it before the model sees it.
       elements:
         mode === "unchanged"
           ? "(screen unchanged — the tree from the previous result still applies)"
-          : rendered.text,
+          : this.hide(this.secretStore.redact(rendered.text)),
       elementCount: snap.elements.length,
       truncated: rendered.truncated,
       mode,
@@ -332,7 +366,7 @@ export class Session {
 
     const raw = await this.device.screenshot();
     const redact = this.policy.config.redactPasswordFields
-      ? snap.elements.filter((e) => e.password)
+      ? snap.elements.filter((e) => e.password || this.holdsSecret(e))
       : [];
     const marks = opts.marks ? snap.elements.filter((e) => e.clickable || e.scrollable) : [];
     const out = annotateScreenshot(raw.data, {
@@ -348,6 +382,20 @@ export class Session {
       snapshotId: snap.snapshotId,
       redacted: this.policy.config.redactPasswordFields,
     };
+  }
+
+  /** Does this element display a stored secret or an entered code? */
+  private holdsSecret(e: UiElement): boolean {
+    if ((e.text && this.hiddenValues.has(e.text)) || (e.value && this.hiddenValues.has(e.value))) return true;
+    const shown = `${e.text ?? ""}\u0000${e.value ?? ""}`;
+    return this.secretStore.redact(shown) !== shown;
+  }
+
+  /** Replace entered codes where they appear as a whole rendered value (`"123456"`). */
+  private hide(text: string): string {
+    let out = text;
+    for (const v of this.hiddenValues) out = out.split(JSON.stringify(v)).join('"«one-time code»"');
+    return out;
   }
 
   // ---------------------------------------------------------------- targeting
@@ -491,7 +539,16 @@ export class Session {
     key: string,
     opts: { target?: Target; submit?: boolean; clear?: boolean } = {},
   ): Promise<ActionResult> {
-    const value = this.secretStore.get(key);
+    return this.typeHidden(this.secretStore.get(key), `«secret:${key}»`, "type_secret", opts);
+  }
+
+  /** Type a value that must not appear in the returned label or the audit trail. */
+  private async typeHidden(
+    value: string,
+    shown: string,
+    name: string,
+    opts: { target?: Target; submit?: boolean; clear?: boolean } = {},
+  ): Promise<ActionResult> {
     let label = "focused field";
     if (opts.target) {
       const t = await this.resolveTarget(opts.target);
@@ -501,9 +558,9 @@ export class Session {
       await sleep(250);
     }
     return this.perform(
-      "type_secret",
+      name,
       { kind: "type_secret", targetText: label, appId: this.snapshot?.screen.app },
-      `${label} ← «secret:${key}»`,
+      `${label} ← ${shown}`,
       async () => {
         if (opts.clear) await this.device.clearText();
         await this.device.typeText(value, { submit: opts.submit });
@@ -643,6 +700,33 @@ export class Session {
 
   // ---------------------------------------------------------------- side channels
 
+  private sources(): MessageSource[] {
+    return this.sourcesFor ? this.sourcesFor(this.device) : defaultSources(this.device, { secretStore: this.secretStore });
+  }
+
+  /**
+   * Recent messages from every configured source: SMS on the device, a rented
+   * number's webhook, a relay phone, a mailbox. Notifications are left out
+   * (they have their own tool) unless asked for.
+   */
+  async readMessages(
+    opts: { limit?: number; sinceMs?: number; includeNotifications?: boolean } = {},
+  ): Promise<{ messages: InboundMessage[]; errors: { source: string; error: string }[] }> {
+    this.policy.assertAllowed({ kind: "read_sms" });
+    const sources = this.sources().filter((s) => opts.includeNotifications || s.name !== "notification");
+    const r = await collectMessages(sources, {
+      sinceMs: opts.sinceMs ?? Date.now() - 24 * 3600_000,
+      limit: opts.limit ?? 20,
+    });
+    this.audit.record({
+      kind: "read_sms",
+      ok: true,
+      result: { count: r.messages.length, sources: sources.map((s) => s.name), errors: r.errors.length },
+    });
+    return r;
+  }
+
+  /** Device-only SMS, kept for callers that want exactly what is on the phone. */
   async readSms(opts: { limit?: number; sinceMs?: number } = {}): Promise<Message[]> {
     this.policy.assertAllowed({ kind: "read_sms" });
     if (!this.device.readSms) throw err("unsupported", "provider cannot read SMS");
@@ -660,46 +744,144 @@ export class Session {
   }
 
   /**
-   * Poll SMS + notifications for a one-time code.
+   * Wait for a one-time code from any source and return it — or type it.
    *
    * This is the single feature that turns "agent gets stuck at 2FA" into
-   * "agent finishes the signup".
+   * "agent finishes the signup". A code is never handed out twice in a
+   * session, so a retry after a failed attempt waits for the new code rather
+   * than resubmitting the stale one.
    */
   async waitForOtp(
-    opts: { fromContains?: string; bodyContains?: string; digits?: number; timeoutMs?: number; sinceMs?: number } = {},
-  ): Promise<{ code: string; message: Message | NotificationItem }> {
-    const digits = opts.digits ?? 6;
-    const since = opts.sinceMs ?? Date.now() - 60_000;
+    opts: {
+      fromContains?: string;
+      bodyContains?: string;
+      digits?: number;
+      timeoutMs?: number;
+      /** Look back this far for a code that arrived before the call. Default 2 minutes. */
+      sinceMs?: number;
+      /** Type the code into the focused field (or `target`) instead of returning it. */
+      enter?: boolean;
+      target?: Target;
+      submit?: boolean;
+      pollMs?: number;
+    } = {},
+  ): Promise<{ code?: string; message: InboundMessage; entered: boolean; result?: ActionResult }> {
+    this.policy.assertAllowed({ kind: "read_sms" });
+    const since = opts.sinceMs ?? Date.now() - 120_000;
     const deadline = Date.now() + (opts.timeoutMs ?? 60_000);
-    const re = new RegExp(`(?<!\\d)(\\d{${digits}})(?!\\d)`);
+    const sources = this.sources();
+    let lastErrors: { source: string; error: string }[] = [];
 
-    while (Date.now() < deadline) {
-      const candidates: { from: string; body: string; raw: Message | NotificationItem }[] = [];
-      if (this.device.readSms) {
-        for (const m of await this.device.readSms({ limit: 15, sinceMs: since })) {
-          candidates.push({ from: m.from, body: m.body, raw: m });
+    for (;;) {
+      const { messages, errors } = await collectMessages(sources, { sinceMs: since, limit: 40 });
+      lastErrors = errors;
+      for (const m of messages) {
+        const key = `${m.origin}:${m.id}`;
+        if (this.consumed.has(key)) continue;
+        if (opts.fromContains && !m.from.toLowerCase().includes(opts.fromContains.toLowerCase())) continue;
+        if (opts.bodyContains && !m.body.toLowerCase().includes(opts.bodyContains.toLowerCase())) continue;
+        const code = findOtp(m.body, opts.digits ? { digits: opts.digits } : {});
+        if (!code) continue;
+        const seenAt = this.consumedCodes.get(code);
+        if (seenAt !== undefined && Math.abs(seenAt - m.receivedAt) < 90_000) {
+          this.consumed.add(key);
+          continue;
         }
+        this.consumed.add(key);
+        this.consumedCodes.set(code, m.receivedAt);
+        this.audit.record({ kind: "wait_for_otp", ok: true, result: { from: m.from, origin: m.origin, digits: code.length } });
+        if (!opts.enter) return { code, message: m, entered: false };
+        this.hiddenValues.add(code);
+        const result = await this.typeHidden(code, `«${code.length}-digit code from ${m.from}»`, "enter_otp", {
+          ...(opts.target ? { target: opts.target } : {}),
+          ...(opts.submit !== undefined ? { submit: opts.submit } : {}),
+        });
+        return { message: m, entered: true, result };
       }
-      if (this.device.readNotifications) {
-        for (const n of await this.device.readNotifications({ limit: 15 })) {
-          if (n.timestamp && n.timestamp < since) continue;
-          candidates.push({ from: n.title ?? n.pkg, body: `${n.title ?? ""} ${n.text ?? ""}`, raw: n });
-        }
-      }
-      for (const c of candidates) {
-        if (opts.fromContains && !c.from.toLowerCase().includes(opts.fromContains.toLowerCase())) continue;
-        if (opts.bodyContains && !c.body.toLowerCase().includes(opts.bodyContains.toLowerCase())) continue;
-        const m = re.exec(c.body);
-        if (m?.[1]) {
-          this.audit.record({ kind: "wait_for_otp", ok: true, result: { from: c.from, digits } });
-          return { code: m[1], message: c.raw };
-        }
-      }
-      await sleep(2000);
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(opts.pollMs ?? 2000, Math.max(0, deadline - Date.now())));
     }
-    throw err("timeout", `No ${digits}-digit code arrived within the timeout`, {
-      hint: "Check the device has signal / the code was actually sent; widen `digits` or drop `fromContains`.",
+
+    const names = sources.map((s) => s.name);
+    const external = names.some((n) => n === "inbox" || n === "imap");
+    throw err("timeout", `No one-time code arrived within the timeout`, {
+      hint:
+        `Checked: ${names.join(", ")}. ` +
+        (this.device.info.transport === "emulator" || this.device.info.platform === "mock" || !this.device.readSms
+          ? "A virtual phone has no SIM — real SMS only arrive through a number the operator connected (docs/telephony.md). "
+          : "") +
+        "Confirm the code was actually sent and to which number/email, then call again. " +
+        (external ? "" : "No external number or mailbox is configured."),
+      details: { sources: names, ...(lastErrors.length ? { sourceErrors: lastErrors } : {}) },
     });
+  }
+
+  /**
+   * Ask the operator to do something only a human should: solve a CAPTCHA,
+   * sign in to Google, approve a biometric prompt. The operator is notified,
+   * takes control in the panel, and hands back.
+   *
+   * Returns "pending" rather than throwing when the wait runs out, so the agent
+   * can keep waiting by calling again with the id.
+   */
+  async requestHuman(
+    reason: string,
+    opts: { handoffId?: string; waitMs?: number } = {},
+  ): Promise<{ id: string; status: "done" | "declined" | "pending"; note?: string }> {
+    this.assertOpen();
+    let id = opts.handoffId;
+    if (id) {
+      const existing = this.approvalStore.get(id);
+      if (!existing || existing.sessionId !== this.id || existing.type !== "handoff") {
+        throw err("bad_request", `No handoff ${id} in this session`);
+      }
+    } else {
+      let evidence: string | undefined;
+      try {
+        const shot = await this.screenshot();
+        evidence = this.audit.saveScreen(shot.data, "handoff");
+      } catch {
+        /* evidence is best effort */
+      }
+      const req = this.approvalStore.create({
+        sessionId: this.id,
+        type: "handoff",
+        action: { kind: "handoff", targetText: reason, appId: this.snapshot?.screen.app },
+        summary: `Agent needs a human on ${this.device.info.name}`,
+        reason,
+        deviceId: this.device.info.id,
+        ...(evidence ? { evidence } : {}),
+        ttlMs: 60 * 60_000,
+      });
+      id = req.id;
+      this.audit.record({ kind: "handoff_requested", ok: true, args: { reason }, result: { id } });
+    }
+
+    const decided = await this.approvalStore.waitFor(id, opts.waitMs ?? this.approvalWaitMs);
+    if (decided.status === "pending" || decided.status === "expired") {
+      return { id, status: "pending" };
+    }
+    this.invalidateSnapshot();
+    const status = decided.status === "approved" ? "done" : "declined";
+    this.audit.record({ kind: "handoff_resolved", ok: status === "done", result: { id, status, by: decided.decidedBy } });
+    return { id, status, ...(decided.note ? { note: decided.note } : {}) };
+  }
+
+  /** Clipboard access goes through policy and the audit trail like everything else. */
+  async clipboard(action: "get" | "set", text = ""): Promise<string> {
+    if (action === "get") {
+      this.policy.assertAllowed({ kind: "clipboard_get" });
+      if (!this.device.clipboardGet) throw err("unsupported", "clipboard read unavailable on this device");
+      const v = await this.device.clipboardGet();
+      this.audit.record({ kind: "clipboard_get", ok: true, result: { length: v.length } });
+      return this.secretStore.redact(v);
+    }
+    this.policy.assertAllowed({ kind: "clipboard_set", text, appId: this.snapshot?.screen.app });
+    if (!this.device.clipboardSet) throw err("unsupported", "clipboard write unavailable on this device");
+    this.mutationSeq++;
+    await this.device.clipboardSet(text);
+    this.audit.record({ kind: "clipboard_set", ok: true, args: { length: text.length } });
+    return "clipboard set";
   }
 
   // ---------------------------------------------------------------- waiting
@@ -1179,6 +1361,11 @@ export class Session {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    try {
+      this.approvalStore.expireForSession(this.id);
+    } catch {
+      /* a full disk must not stop the device being released */
+    }
     this.audit.record({ kind: "session_end", ok: true, result: this.stats() as unknown as Record<string, unknown> });
     await this.device.dispose();
     log.info(`session ${this.id} closed after ${this.actionCount} actions`);

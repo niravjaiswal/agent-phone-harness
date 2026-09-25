@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { paths, ensureDir } from "./paths.js";
 import { sleep } from "./exec.js";
 import { logger } from "./logger.js";
+import { notifyOperator } from "./notify.js";
 import type { ActionDescriptor } from "./policy.js";
 
 const log = logger("approvals");
@@ -12,7 +13,13 @@ export type ApprovalStatus = "pending" | "approved" | "denied" | "expired";
 
 export interface ApprovalRequest {
   id: string;
+  /**
+   * approval — the agent wants to do something risky; a human says yes or no.
+   * handoff  — the agent needs a human to do something (CAPTCHA, sign-in); a human does it and hands back.
+   */
+  type?: "approval" | "handoff";
   sessionId: string;
+  deviceId?: string;
   createdAt: number;
   expiresAt: number;
   action: ActionDescriptor;
@@ -35,7 +42,11 @@ export interface ApprovalRequest {
  * agent cannot approve its own action.
  */
 export class ApprovalStore {
-  constructor(private dir: string = paths.approvals) {
+  constructor(
+    private dir: string = paths.approvals,
+    /** Push to the operator's configured channels. Off for throwaway stores (tests). */
+    private notifications = true,
+  ) {
     ensureDir(this.dir);
   }
 
@@ -45,6 +56,8 @@ export class ApprovalStore {
 
   create(input: {
     sessionId: string;
+    type?: "approval" | "handoff";
+    deviceId?: string;
     action: ActionDescriptor;
     summary: string;
     reason: string;
@@ -54,7 +67,9 @@ export class ApprovalStore {
     const now = Date.now();
     const req: ApprovalRequest = {
       id: randomUUID().slice(0, 8),
+      type: input.type ?? "approval",
       sessionId: input.sessionId,
+      ...(input.deviceId ? { deviceId: input.deviceId } : {}),
       createdAt: now,
       expiresAt: now + (input.ttlMs ?? 5 * 60_000),
       action: input.action,
@@ -64,9 +79,14 @@ export class ApprovalStore {
       status: "pending",
     };
     writeFileSync(this.file(req.id), JSON.stringify(req, null, 2), { mode: 0o600 });
-    log.warn(`approval required [${req.id}]: ${req.summary} — ${req.reason}`);
-    log.warn(`approve with: agent-phone approve ${req.id}    deny with: agent-phone deny ${req.id}`);
-    void this.notify(req);
+    if (req.type === "handoff") {
+      log.warn(`agent asked for a human [${req.id}]: ${req.reason}`);
+      log.warn(`when done: agent-phone approve ${req.id}    to decline: agent-phone deny ${req.id}`);
+    } else {
+      log.warn(`approval required [${req.id}]: ${req.summary} — ${req.reason}`);
+      log.warn(`approve with: agent-phone approve ${req.id}    deny with: agent-phone deny ${req.id}`);
+    }
+    if (this.notifications) void this.notify(req);
     return req;
   }
 
@@ -111,6 +131,36 @@ export class ApprovalStore {
     return r;
   }
 
+  /** Delete decided or expired requests older than `maxAgeMs`. Pending ones are never touched. */
+  prune(maxAgeMs: number, now = Date.now()): number {
+    let n = 0;
+    for (const r of this.list()) {
+      if (r.status === "pending") continue;
+      if (now - (r.decidedAt ?? r.expiresAt) > maxAgeMs) {
+        rmSync(this.file(r.id), { force: true });
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Expire everything a session left pending. Once the session is gone nobody
+   * will retry with the id, so a card asking the operator to decide is noise.
+   */
+  expireForSession(sessionId: string): number {
+    let n = 0;
+    for (const r of this.list({ pendingOnly: true })) {
+      if (r.sessionId !== sessionId) continue;
+      r.status = "expired";
+      r.decidedAt = Date.now();
+      r.note = "session ended";
+      writeFileSync(this.file(r.id), JSON.stringify(r, null, 2), { mode: 0o600 });
+      n++;
+    }
+    return n;
+  }
+
   async waitFor(id: string, timeoutMs?: number): Promise<ApprovalRequest> {
     const start = Date.now();
     for (;;) {
@@ -126,25 +176,16 @@ export class ApprovalStore {
   }
 
   private async notify(req: ApprovalRequest): Promise<void> {
-    const url = process.env.PHONE_APPROVAL_WEBHOOK;
-    if (!url) return;
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          type: "approval_required",
-          id: req.id,
-          sessionId: req.sessionId,
-          summary: req.summary,
-          reason: req.reason,
-          expiresAt: req.expiresAt,
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-    } catch (e) {
-      log.warn("approval webhook failed", (e as Error).message);
-    }
+    const handoff = req.type === "handoff";
+    await notifyOperator({
+      kind: handoff ? "handoff" : "approval",
+      id: req.id,
+      sessionId: req.sessionId,
+      title: handoff ? "Your agent needs a hand" : "Approval needed",
+      body: handoff ? req.reason : `${req.summary} — ${req.reason}`,
+      path: `/panel/#/approvals/${req.id}`,
+      expiresAt: req.expiresAt,
+    });
   }
 }
 
