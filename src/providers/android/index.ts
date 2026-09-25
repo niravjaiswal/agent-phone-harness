@@ -385,6 +385,30 @@ export class AndroidProvider implements DeviceProvider {
     }));
   }
 
+  /**
+   * Keep network phones attached. A redroid container that restarts drops its
+   * adb connection and never comes back on its own; re-connecting on an
+   * interval makes a restart invisible to agents beyond a short gap.
+   */
+  async ensureConnected(targets: string[]): Promise<string[]> {
+    if (!targets.length) return [];
+    const adbPath = await this.resolveAdb();
+    const r = await this.run(adbPath, ["devices"], { timeoutMs: 15_000, allowFailure: true });
+    const online = new Set(parseDevices(r.stdout).filter((d) => d.state === "device").map((d) => d.serial));
+    const connected: string[] = [];
+    for (const t of targets) {
+      if (online.has(t)) continue;
+      const c = await this.run(adbPath, ["connect", t], { timeoutMs: 20_000, allowFailure: true });
+      if (/connected to/i.test(c.stdout)) {
+        log.info(`connected to ${t}`);
+        connected.push(t);
+      } else {
+        log.debug(`adb connect ${t}: ${c.stdout.trim() || c.stderr.trim()}`);
+      }
+    }
+    return connected;
+  }
+
   /** `adb connect host:port` — this is what makes "the agent's phone" location-independent. */
   async connect(hostPort: string): Promise<string> {
     const adbPath = await this.resolveAdb();

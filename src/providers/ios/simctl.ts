@@ -21,6 +21,8 @@ export function parseSimctlList(json: string): SimDevice[] {
   const parsed = JSON.parse(json) as SimctlListJson;
   const out: SimDevice[] = [];
   for (const [runtime, list] of Object.entries(parsed.devices ?? {})) {
+    // Watches, TVs and headsets are not phones an agent can drive.
+    if (!/SimRuntime\.iOS-/.test(runtime)) continue;
     for (const d of list) {
       if (d.isAvailable === false) continue;
       out.push({

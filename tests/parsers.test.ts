@@ -140,13 +140,16 @@ describe("WebDriverAgent source", () => {
 });
 
 describe("simctl list", () => {
-  it("flattens runtimes and skips unavailable devices", () => {
+  it("flattens iOS runtimes and skips unavailable devices and non-phones", () => {
     const list = parseSimctlList(
       JSON.stringify({
         devices: {
           "com.apple.CoreSimulator.SimRuntime.iOS-26-1": [
             { udid: "AAA", name: "iPhone 17 Pro", state: "Booted", isAvailable: true },
             { udid: "BBB", name: "Old", state: "Shutdown", isAvailable: false },
+          ],
+          "com.apple.CoreSimulator.SimRuntime.watchOS-26-0": [
+            { udid: "WWW", name: "Apple Watch", state: "Shutdown", isAvailable: true },
           ],
         },
       }),
