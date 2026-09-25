@@ -6,22 +6,31 @@ describe("HTTP API", () => {
   let base: string;
   let stop: () => Promise<void>;
   let sessionId: string;
-  const TOKEN = "test-token-123";
+  const AGENT = "agt_test_token_123";
+  const OPERATOR = "op_test_token_456";
 
-  const req = async (path: string, init: RequestInit = {}) =>
+  const req = async (path: string, init: RequestInit = {}, token = AGENT) =>
     fetch(`${base}${path}`, {
       ...init,
       headers: {
-        authorization: `Bearer ${TOKEN}`,
+        authorization: `Bearer ${token}`,
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...(init.headers ?? {}),
       },
     });
 
-  const post = (path: string, body: unknown) => req(path, { method: "POST", body: JSON.stringify(body) });
+  const post = (path: string, body: unknown, token = AGENT) =>
+    req(path, { method: "POST", body: JSON.stringify(body) }, token);
 
   beforeAll(async () => {
-    const s = await serve({ port: 0, host: "127.0.0.1", token: TOKEN, allowMockFallback: true });
+    const s = await serve({
+      port: 0,
+      host: "127.0.0.1",
+      agentToken: AGENT,
+      operatorToken: OPERATOR,
+      allowMockFallback: true,
+      ceiling: { mode: "guarded" },
+    });
     base = `http://127.0.0.1:${s.port}`;
     stop = s.close;
   });
@@ -71,6 +80,15 @@ describe("HTTP API", () => {
     expect(body.screen.elements).toContain("Sign in");
   });
 
+  it("returns the compact MCP-style rendering with ?format=text", async () => {
+    const r = await post(`/sessions/${sessionId}/observe?format=text`, {});
+    expect(r.headers.get("content-type")).toContain("text/plain");
+    const t = await r.text();
+    expect(t).toMatch(/^Screen: com\.example\.demobank/);
+    expect(t).toMatch(/e\d+ Button "Sign in"/);
+    expect(t).not.toContain("\\n");
+  });
+
   it("serves a PNG screenshot", async () => {
     const r = await req(`/sessions/${sessionId}/screenshot?marks=1`);
     expect(r.headers.get("content-type")).toBe("image/png");
@@ -90,9 +108,9 @@ describe("HTTP API", () => {
     expect(missing.status).toBe(404);
   });
 
-  it("streams events over SSE", async () => {
+  it("streams operator events over SSE", async () => {
     const ctrl = new AbortController();
-    const r = await req("/events", { signal: ctrl.signal });
+    const r = await req("/events", { signal: ctrl.signal }, OPERATOR);
     expect(r.headers.get("content-type")).toContain("text/event-stream");
     const reader = r.body!.getReader();
     const chunk = new TextDecoder().decode((await reader.read()).value);
@@ -100,28 +118,38 @@ describe("HTTP API", () => {
     ctrl.abort();
   });
 
-  it("lets an operator approve a gated action out of band", async () => {
-    // Drive to a screen with a risky control.
+  it("does not stream operator events to an agent", async () => {
+    expect((await req("/events")).status).toBe(403);
+  });
+
+  it("lets an operator approve a gated action out of band — and never the agent", async () => {
     await post(`/sessions/${sessionId}/type`, { selector: { label: "Username" }, text: "ada" });
     await post(`/sessions/${sessionId}/type`, { selector: { label: "Password" }, text: "pw" });
     await post(`/sessions/${sessionId}/tap`, { selector: { text: "Sign in" } });
-    const otp = (await (
-      await post(`/sessions/${sessionId}/wait_for_otp`, { digits: 6, timeoutMs: 8000 })
-    ).json()) as { code: string };
-    await post(`/sessions/${sessionId}/type`, { selector: { label: "Verification code" }, text: otp.code });
+    await post(`/sessions/${sessionId}/wait_for_otp`, {
+      enter: true,
+      selector: { label: "Verification code" },
+      timeoutMs: 8000,
+    });
     await post(`/sessions/${sessionId}/tap`, { selector: { text: "Verify" } });
 
     const gated = post(`/sessions/${sessionId}/tap`, { selector: { text: "Send money" } });
 
-    // Meanwhile an operator lists and approves.
     let approvalId: string | undefined;
     for (let i = 0; i < 40 && !approvalId; i++) {
       await new Promise((res) => setTimeout(res, 100));
-      const list = (await (await req("/approvals?pending=1")).json()) as { approvals: { id: string }[] };
+      const list = (await (await req("/api/operator/approvals?pending=1", {}, OPERATOR)).json()) as {
+        approvals: { id: string }[];
+      };
       approvalId = list.approvals[0]?.id;
     }
     expect(approvalId).toBeTruthy();
-    const decided = await post(`/approvals/${approvalId}/approve`, { by: "test", note: "ok" });
+
+    // The v0.1 hole: the agent's own token could approve. Both routes now refuse it.
+    expect((await post(`/approvals/${approvalId}/approve`, {})).status).toBe(403);
+    expect((await post(`/api/operator/approvals/${approvalId}/approve`, {})).status).toBe(403);
+
+    const decided = await post(`/approvals/${approvalId}/approve`, { note: "ok" }, OPERATOR);
     expect(decided.status).toBe(200);
 
     const body = (await (await gated).json()) as { ok?: boolean; change?: string };
