@@ -3,3 +3,8 @@ dist/
 *.log
 .artifacts/
 .agent-phone/
+
+# local preview config (machine-specific paths)
+.claude/launch.json
+# deployment secrets
+deploy/.env

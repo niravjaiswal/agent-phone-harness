@@ -5,11 +5,16 @@
 # modules, which means a Linux host — on macOS or Windows use `agent-phone up`
 # instead, which drives a normal emulator.
 #
-#   docker compose -f docker/compose.yml up -d
+# Just the phone, for running the harness yourself on the same Linux machine
+# (`agent-phone serve`). For the full hosted stack use compose.yml.
+#
+#   docker compose -f deploy/phone-only.compose.yml up -d
 #   adb connect localhost:5555
 #   agent-phone doctor
 #
-# Scale by copying the phone-1 block: bump the published port and the data volume.
+# The port is bound to loopback: adb has no encryption, so it must never be
+# reachable from the network. Scale by copying the phone-1 block with the next
+# port and its own volume.
 
 services:
   phone-1:
@@ -17,7 +22,7 @@ services:
     container_name: agent-phone-1
     privileged: true
     ports:
-      - "5555:5555"
+      - "127.0.0.1:5555:5555"
     volumes:
       - phone-1-data:/data
     command:

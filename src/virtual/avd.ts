@@ -74,7 +74,7 @@ export const INSTALL_HINT =
   "  Linux:  sdk=$HOME/Android/Sdk; mkdir -p $sdk/cmdline-tools && \\\n" +
   "          curl -o /tmp/clt.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && \\\n" +
   "          unzip -q /tmp/clt.zip -d $sdk/cmdline-tools && mv $sdk/cmdline-tools/cmdline-tools $sdk/cmdline-tools/latest\n" +
-  "Or run a container instead — no SDK needed: docker compose -f docker/compose.yml up -d";
+  "Or run the container stack on a Linux host — no SDK needed: see docs/hosting.md";
 
 /** ARM hosts must use an ARM image; an x86 image under emulation is unusably slow. */
 export function systemImage(opts: { api?: number; variant?: string; arch?: string } = {}): string {
@@ -229,7 +229,7 @@ export async function killEmulator(adbPath: string, serial: string, run: Runner 
  *
  * A virtual phone has no SIM, so this is how an OTP flow is exercised without a
  * carrier. For codes from a *real* sender you need a real number — see
- * docs/setup/telephony.md.
+ * docs/telephony.md.
  */
 export async function sendEmulatorSms(
   adbPath: string,
