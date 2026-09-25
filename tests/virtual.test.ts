@@ -132,7 +132,7 @@ describe("VirtualPhoneManager.up", () => {
     const e = await new VirtualPhoneManager(run).up().catch((x) => x);
     expect(e.code).toBe("tool_missing");
     expect(e.hint).toContain("brew install --cask android-commandlinetools");
-    expect(e.hint).toContain("docker compose");
+    expect(e.hint).toContain("docs/hosting.md");
   });
 
   it("surfaces the download cost in doctor output before anything is fetched", async () => {
