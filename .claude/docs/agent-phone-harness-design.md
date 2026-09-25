@@ -1,6 +1,6 @@
 # Agent Phone Harness — Design
 
-**Status:** implemented (v0.1)
+**Status:** implemented (v0.1); extended in v0.2 — the message sources, operator policy ceiling, hosted appliance and operator panel listed below as future work shipped; see `v0.2-plan.md`.
 **Date:** 2026-09-20
 **Goal:** give any tool-using agent (Instinct, Claude Code, a custom loop) a durable, safe way to drive *its own* phone end-to-end, so tasks that only exist on mobile don't bounce back to the human.
 
