@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: demo runs end to end on the mock phone
+        run: node dist/cli.js demo
+      - name: package contains what it should
+        run: npm pack --dry-run 2>&1 | tee pack.txt && grep -q dist/panel/app.js pack.txt && grep -q dist/cli.js pack.txt
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: agent-phone-harness:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: smoke test the image
+        run: |
+          docker run -d --name harness -e PHONE_ALLOW_MOCK=1 -p 127.0.0.1:8712:8712 agent-phone-harness:ci
+          for i in $(seq 1 30); do curl -fs 127.0.0.1:8712/health && break; sleep 1; done
+          TOKEN=$(docker exec harness agent-phone token | awk '/^agent token/{print $3}')
+          curl -fs -H "authorization: Bearer $TOKEN" 127.0.0.1:8712/devices | grep -q mock:demo
+          curl -fs 127.0.0.1:8712/agent.md | grep -q "You have a phone"
+          curl -fs 127.0.0.1:8712/panel/ | grep -q app.js
+          docker exec harness adb version
+      - name: deployment files are valid
+        run: |
+          docker compose -f deploy/compose.yml config --quiet
+          bash -n deploy/install.sh
