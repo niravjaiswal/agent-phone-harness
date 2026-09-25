@@ -1,15 +1,10 @@
 {
+  "_comment": "Local agents (Claude Code, Cursor): spawn the harness over stdio. Install first with `npm install -g github:niravjaiswal/agent-phone-harness`. Cloud agents cannot spawn processes — see docs/instinct.md for the HTTP setup.",
   "mcpServers": {
     "phone": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "agent-phone-harness",
-        "mcp"
-      ],
+      "command": "agent-phone",
+      "args": ["mcp"],
       "env": {
-        "PHONE_ALLOW_MOCK": "0",
-        "PHONE_WDA_URL": "http://127.0.0.1:8100",
         "PHONE_LOG_LEVEL": "info"
       }
     }

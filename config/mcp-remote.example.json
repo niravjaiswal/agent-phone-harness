@@ -1,0 +1,12 @@
+{
+  "_comment": "Clients that support remote MCP servers: point them at a running `agent-phone serve` (or the container stack). Use the AGENT token — never the operator token.",
+  "mcpServers": {
+    "phone": {
+      "type": "http",
+      "url": "https://your-phone-host.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer agt_REPLACE_ME"
+      }
+    }
+  }
+}
