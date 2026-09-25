@@ -1,17 +1,27 @@
 {
   "name": "agent-phone-harness",
-  "version": "0.1.0",
-  "description": "Give an AI agent its own phone. Uniform perception/action harness over Android, iOS and mock devices, exposed via MCP, HTTP and CLI.",
+  "version": "0.2.0",
+  "description": "Give an AI agent its own phone. A virtual Android phone, an operator panel, a number for 2FA, and human approval for risky actions — exposed over MCP, HTTP and CLI.",
   "license": "Apache-2.0",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "agent-phone": "dist/cli.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": { ".": "./dist/index.js" },
-  "files": ["dist", "config", "README.md"],
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "config",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "dev": "tsx src/cli.ts",
@@ -20,6 +30,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
     "e2e:android": "npm run build && node scripts/e2e-android.mjs"
   },
   "dependencies": {
@@ -35,5 +46,25 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
+  },
+  "keywords": [
+    "mcp",
+    "ai-agent",
+    "android",
+    "automation",
+    "phone",
+    "otp",
+    "2fa",
+    "emulator",
+    "redroid",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/niravjaiswal/agent-phone-harness.git"
+  },
+  "homepage": "https://github.com/niravjaiswal/agent-phone-harness#readme",
+  "bugs": {
+    "url": "https://github.com/niravjaiswal/agent-phone-harness/issues"
   }
 }
