@@ -1,199 +1,139 @@
 # agent-phone-harness
 
-Give an agent its own phone — no hardware required.
+Give an AI agent its own phone — no hardware required.
 
-A uniform perception/action harness over a **virtual Android phone**, physical Android devices and iOS,
-exposed via **MCP**, **HTTP/SSE** and a **CLI**, so a tool-using agent (Instinct, Claude Code, your own
-loop) can finish tasks that only exist on a mobile device, end to end, without a human stepping in.
+A virtual Android phone your agent drives by reading its screen as text, plus the parts that make
+real tasks finish: **a phone number for 2FA codes**, **your approval for anything risky, from your
+own phone**, a way for the agent to **ask you for a hand**, and a record of everything it did.
+Works with agents that run on your machine (Claude Code, Cursor — over MCP) and agents that run in
+the cloud and cannot install anything (Instinct — over HTTPS).
 
 ```bash
-npx -y agent-phone-harness demo
+npx -y github:niravjaiswal/agent-phone-harness demo
 ```
 
-Sixty seconds, nothing installed, no phone. Runs a full task on a simulated device: log in, collect an SMS
-one-time code, attempt a money transfer that gets stopped for human approval, and hit the things the
-harness refuses outright.
+A minute, nothing to set up, no phone: a full task on a simulated device — sign in, read an SMS code,
+try to send money, get stopped for approval, hit the things the harness refuses outright.
 
 ---
 
-## Why
+## Pick your path
 
-Agents stall on a specific class of task: app-only services, SMS and push one-time codes, device-bound
-2FA, anything gated behind a mobile client. Web automation cannot reach these, so a human takes over and
-the end-to-end property is lost.
+**Your agent runs on your machine** (Claude Code, Cursor, your own loop):
 
-This harness gives the agent a phone — by default a **virtual** one it creates on your machine in one
-command — plus the mobile-specific side channels (SMS, notifications, deep links) that make those flows
-tractable.
+```bash
+brew install --cask android-commandlinetools          # Linux: `agent-phone doctor` prints the recipe
+npm install -g github:niravjaiswal/agent-phone-harness
+agent-phone up                                         # a headless Android phone, ~1.5 GB first time
+```
 
-Design rationale and the options weighed: [`.claude/docs/agent-phone-harness-design.md`](.claude/docs/agent-phone-harness-design.md).
+```json
+{ "mcpServers": { "phone": { "command": "agent-phone", "args": ["mcp"] } } }
+```
+
+**Your agent runs in the cloud** (Instinct, hosted agents) — it needs an address, not a process:
+
+```bash
+agent-phone up && agent-phone serve --public           # on your Mac; needs `brew install cloudflared`
+# or, on any Ubuntu VM, always on:
+curl -fsSL https://raw.githubusercontent.com/niravjaiswal/agent-phone-harness/main/deploy/install.sh | bash
+```
+
+Both print an operator-panel sign-in link and a block to paste into your agent.
+Walkthrough: **[docs/instinct.md](docs/instinct.md)** · Hosting: **[docs/hosting.md](docs/hosting.md)**
 
 ---
 
 ## What an agent actually sees
 
-Perception is **accessibility-tree first**, screenshots on demand. A screen costs ~1-3k characters instead
-of a 40-80k-character raw dump or an expensive image:
+Accessibility tree first, screenshots on demand. A screen costs ~1–3k characters instead of an image:
 
 ```
 Screen: com.example.bank / .LoginActivity (1080x2340 portrait)
 e1 Text "Welcome back"
   e2 TextField label="Email address" value="ada@example.com" id=email [focused] @540,470
   e3 TextField label="Password" id=password [password] @540,670
-  e4 Switch label="Remember this device" id=remember [checked] @966,840
   e5 Button "Sign in" id=signin @540,1010
-  e6 Text "Forgot password?" [clickable] @274,1155
 ```
 
-Every mutating tool returns the **resulting** screen plus a change summary, so there is no act → observe →
-observe round-trip:
+Every action returns the **resulting** screen, so there is no act → observe round trip:
 
 ```
-✓ tap → e5 Button "Sign in"
+✓ tap → Button "Sign in"
 screen: com.example.bank/.LoginActivity → com.example.bank/.OtpActivity, +4 elements, -6 elements
 ```
 
-Target elements by **selector** (`{"text":"Continue"}`, `{"id":"signin"}`, `{"role":"TextField","index":1}`),
-re-resolved at action time so it survives re-renders, or by **ref** (`e5`), revalidated by identity before
-the tap fires. Ambiguous matches are an error, not a coin flip — mis-tapping a duplicate label is how money
-goes to the wrong person.
+Target by **selector** (`{"text":"Continue"}`, `{"label":"Email"}`, `{"id":"signin"}`), re-resolved
+against the live screen every time, or by **ref** (`e5`), revalidated before the tap fires. Ambiguous
+matches are an error, not a coin flip — mis-tapping a duplicate label is how money goes to the wrong person.
 
 ---
 
-## Quickstart
+## The operator panel
 
-### 1. Give the agent a phone
+`/panel/` on the server. Built for your phone, since that is where approval requests reach you.
 
-```bash
-brew install --cask android-commandlinetools    # macOS; Linux recipe printed by `doctor`
-npx -y agent-phone-harness up
+| Tab | |
+|---|---|
+| **Phone** | Live screen. *Take control* pauses the agent and lets you tap, swipe and type — sign in to Google, solve a CAPTCHA — then *Hand back*. Install an app from its APK. |
+| **Approvals** | What the agent was stopped from doing, with the screen at that moment. Approve, deny, or leave a note. Requests for help land here too. |
+| **Activity** | Every session and every action, with screenshots. What you did in the panel, too (never what you typed). |
+| **Connect agent** | The MCP URL, the agent token, and a paste-ready block for browsing agents. |
+| **Setup** | Phone number and SMS webhooks, email codes, notifications (ntfy, Telegram, Slack, webhook), secrets, and what the agent is allowed to do. |
+
+Sign in with a one-time link (`agent-phone panel-link`) or the operator token.
+
+---
+
+## A number for 2FA
+
+A virtual phone has no SIM, so SMS codes are received elsewhere and read by the harness:
+
+| | Cost | |
+|---|---|---|
+| **Telnyx** or **Twilio** number | ~$1/month | webhook, signature-verified |
+| **Relay phone** — spare Android + prepaid SIM | ~$3–10/month | passes "no VoIP" checks, gets short codes |
+| **Google Voice / email** over IMAP | free | also catches emailed codes |
+
+```
+phone_wait_for_otp {"enter": true, "selector": {"label": "Verification code"}}
+→ code from +15550001111 (telnyx) entered
 ```
 
+With `enter:true` the code is typed for the agent and never returned to it — and hidden where the field
+echoes it back. Setup: **[docs/telephony.md](docs/telephony.md)**.
+
+---
+
+## When the agent needs you
+
+**Risky actions wait for you.** Tapping *Pay*, *Send*, *Transfer*, *Delete*, *Confirm*, *Subscribe*…
+stops the action and notifies you with a link. Approve from your phone; the agent carries on. Neither the
+agent's tools nor its token can approve anything.
+
+**The agent can ask for a hand.** A CAPTCHA, a Google sign-in, a "verify it's you" screen:
+
 ```
-  installing platform-tools, emulator, system-images;android-34;google_apis_playstore;arm64-v8a
-  — the system image is ~1.5 GB, this takes a few minutes
-  creating virtual device "agent-phone"
-  booting emulator-5554 (headless)
-  waiting for Android to finish booting (first boot is slow)
-  ready: android:emulator-5554
-```
-
-There is now an Android phone running as a background process. No window, no handset, no SIM, no cable.
-
-```bash
-agent-phone down        # stop it; state is preserved
-agent-phone up          # bring it back, still logged into everything
-agent-phone destroy     # delete it and all its state
-agent-phone up --window # boot it visible, to set something up by hand
-```
-
-**State persists**, which is the whole point of a long-lived virtual phone: install your target app and log
-in once, and every later task skips the login.
-
-On Linux, or to run several phones on one box, use containers instead — no SDK on the host:
-
-```bash
-docker compose -f docker/compose.yml up -d && adb connect localhost:5555
+phone_request_human {"reason": "Solve the CAPTCHA on the sign-up screen"}
+→ pending — the owner has been notified (handoffId 3f9c21aa)
+…
+→ done — the human finished. Observe the screen before continuing.
 ```
 
-### 2. Put your app on it
-
-A fresh emulator is a blank phone. Either sideload, which avoids all Google friction:
-
-```bash
-adb -s emulator-5554 install ~/Downloads/target-app.apk
-```
-
-…or `agent-phone up --window`, sign into a Google account made for this, and install from the Play Store.
-
-### 3. Point your agent at it
-
-```json
-{
-  "mcpServers": {
-    "phone": {
-      "command": "npx",
-      "args": ["-y", "agent-phone-harness", "mcp"]
-    }
-  }
-}
-```
-
-If your agent runs hosted rather than on your machine, it cannot spawn a local process. Run the harness as
-a server next to the phone instead, and point the agent at `https://your-host:8712/mcp`:
-
-```bash
-PHONE_API_TOKEN=$(openssl rand -hex 16) agent-phone serve --host 0.0.0.0
-```
-
-### 4. Store any passwords
-
-```bash
-agent-phone secret set target_app_password     # reads stdin, never shell history
-```
-
-The agent can ask the harness to *type* a secret. It can never read one back, and values are scrubbed from
-every trace line and error message.
+**You can take over any time.** While you have control, the agent's actions fail with `device_busy`.
 
 ---
 
 ## What a virtual phone cannot do
 
-Two real limits. Know them before you build on this.
-
 | Limit | Consequence | Workaround |
 |---|---|---|
-| **No SIM** | No phone number, so a real sender's SMS code never arrives. `adb emu sms send` injects messages, which covers testing but not a real bank. | Telephony is a service, not hardware: a programmable number (Twilio/Telnyx, ~$1/mo) or IMAP email-OTP can feed the same `phone_wait_for_otp`. Not yet built — see the roadmap. |
-| **Play Integrity** | Apps calling the attestation API see device integrity fail. Most banking, some fintech and gov apps hard-refuse. | None. This is the only reason the physical path exists. |
+| **No SIM** | Codes sent by SMS never reach it on their own. | Connect a number ([telephony.md](docs/telephony.md)). Apps that bind to the SIM itself still will not work. |
+| **Play Integrity** | Apps that check device integrity refuse to run — most banking, some fintech, government ID. | A physical Android phone; the harness drives it identically. |
+| **No Play Store** (container phone) | Apps must be installed from their APK. | Panel → *Install an app*, or use `agent-phone up`, whose image has the Play Store. |
 
-Retail, delivery, SaaS, social, productivity and most utility apps are unaffected.
-
----
-
-## Physical devices
-
-The escape hatch for attestation-gated apps. Everything above works unchanged — a handset and an emulator
-are both just adb devices.
-
-```bash
-brew install --cask android-platform-tools
-adb devices                    # accept the USB-debugging prompt on the phone
-agent-phone doctor
-```
-
-Over the network, so the phone can sit on a shelf anywhere reachable:
-
-```bash
-adb tcpip 5555                 # once, over USB
-agent-phone connect 100.83.1.4:5555
-```
-
-Optional one-time grant, which enables `phone_read_sms`:
-
-```bash
-adb shell pm grant com.android.shell android.permission.READ_SMS
-```
-
-Non-ASCII input needs [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard) installed and selected, then
-`PHONE_ADB_KEYBOARD=1`. Without it the harness refuses non-ASCII rather than typing garbage.
-
-## iOS
-
-`simctl` (simulators) and `devicectl` (physical devices) ship with Xcode and cover lifecycle, screenshots
-and deep links. **Touch and perception need WebDriverAgent**, which is genuinely more work than Android:
-
-```bash
-# Simulator: run the WebDriverAgentRunner test target from Xcode, or
-xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
-
-# Physical device: run WDA on the device, then forward the port
-iproxy 8100 8100
-```
-
-Then `PHONE_WDA_URL=http://127.0.0.1:8100` (the default). Without WDA the harness still lists devices,
-launches apps, opens deep links and takes screenshots — and says plainly that tapping and observing are
-unavailable, rather than failing obscurely.
+Retail, delivery, travel, social and productivity apps are generally fine.
+**[docs/compatibility.md](docs/compatibility.md)** collects reports.
 
 ---
 
@@ -201,23 +141,39 @@ unavailable, rather than failing obscurely.
 
 | Tool | Notes |
 |---|---|
-| `phone_list_devices` | virtual, physical Android (USB/TCP), iOS (sim + device), mock |
-| `phone_session_start` / `_status` / `_end` | scopes policy, budgets and the audit trail |
+| `phone_session_start` / `_status` / `_end` | one task, one phone; tells the agent its number and email |
 | `phone_observe` | element tree with refs — the cheap, precise way to see |
-| `phone_screenshot` | password fields blacked out; `marks:true` for numbered boxes |
+| `phone_screenshot` | password fields and typed secrets blacked out; `marks:true` numbers the targets |
 | `phone_tap`, `phone_type`, `phone_key`, `phone_swipe`, `phone_scroll`, `phone_clear_text` | input |
-| `phone_batch` | **several actions in one call — the single biggest saving available** |
-| `phone_type_secret` | types a stored secret; the value never enters your context |
+| `phone_batch` | **several actions in one call — the biggest saving available** |
+| `phone_type_secret` | types a stored secret; the value never enters the agent's context |
+| `phone_wait_for_otp` | a code from SMS, a connected number, email or a notification; `enter:true` types it |
+| `phone_request_human` | hand off to the owner and wait |
 | `phone_wait_for` | wait for something to appear or disappear |
-| `phone_open_app`, `phone_stop_app`, `phone_list_apps` | app lifecycle |
+| `phone_open_app`, `phone_stop_app`, `phone_list_apps` | apps |
 | `phone_open_url`, `phone_list_deep_links` | a declared URL often replaces a whole tap sequence |
-| `phone_read_sms`, `phone_read_notifications`, `phone_wait_for_otp` | the 2FA unblocker |
-| `phone_clipboard` | paste long or non-ASCII text |
+| `phone_read_sms`, `phone_read_notifications`, `phone_clipboard` | side channels |
 | `phone_install_app`, `phone_clear_app_data`, `phone_shell` | privileged; off unless the policy allows |
+| `phone_list_devices`, `phone_list_secrets` | discovery |
 
-No tool can approve a gated action. That path is operator-only, by construction.
+### HTTP
 
-### Using it from TypeScript
+The server behind `agent-phone serve` and the container stack. Agents that cannot use MCP read
+**`/agent.md`** and use REST; add `?format=text` to get the same compact screens MCP returns.
+
+| Route | Who | |
+|---|---|---|
+| `POST /mcp` | agent | MCP over streamable HTTP; each connection owns its sessions |
+| `POST /sessions`, `POST /sessions/:id/<action>`, `DELETE /sessions/:id` | agent | `tap`, `type`, `batch`, `wait_for_otp`, `request_human`, … |
+| `GET /sessions/:id/screenshot` | agent | PNG |
+| `GET /agent.md` | anyone | instructions an agent can follow on its own; no credentials in it |
+| `/panel/`, `/api/operator/*`, `/events` | operator | panel, approvals, takeover, secrets, config, live events |
+| `POST /hooks/sms/{telnyx,twilio,relay}` | provider | signature- or token-verified inbound SMS |
+
+Two tokens: the **agent token** (safe to give an agent) and the **operator token** (never). The server
+refuses to start if they match and refuses the operator token on agent routes.
+
+### From TypeScript
 
 ```ts
 import { Harness } from "agent-phone-harness";
@@ -231,161 +187,121 @@ await session.batch([
   { action: "type_secret", selector: { label: "Password" }, key: "bank_password" },
   { action: "tap", selector: { text: "Sign in" } },
 ]);
-
-const { code } = await session.waitForOtp({ digits: 6 });
-await session.type(code, { target: { selector: { label: "Verification code" } } });
+await session.waitForOtp({ enter: true, target: { selector: { label: "Verification code" } } });
 const result = await session.tap({ selector: { text: "Verify" } });
-
 console.log(result.screen.elements);
 await harness.close(session.id);
 ```
-
-### REST, SSE and MCP over HTTP
-
-| Endpoint | What |
-|---|---|
-| `POST /mcp` | the same MCP tool surface, streamable HTTP |
-| `GET /devices`, `GET /doctor` | discovery |
-| `POST /sessions` | open a session → `{sessionId, screen}` |
-| `POST /sessions/:id/<action>` | `tap`, `type`, `batch`, `scroll`, `wait_for`, `open_url`, `deep_links`, … |
-| `GET /sessions/:id/screenshot?marks=1` | PNG |
-| `GET /approvals`, `POST /approvals/:id/approve` | operator-only approval flow |
-| `GET /events` | SSE: approval requests, decisions, heartbeats |
-
-The server refuses to bind anything but loopback without `PHONE_API_TOKEN` — this endpoint drives a phone.
 
 ---
 
 ## Driving it efficiently
 
-Three things the harness does so an agent spends fewer turns and fewer device round trips.
-
-**Batch what you can predict.** A login form is five actions and one decision. `phone_batch` runs the
-sequence in a single call, re-resolving each step's selector against a fresh screen so it can never act on
-stale coordinates, stopping at the first failure with exactly what ran and what did not. Measured on the
-demo login flow:
+**Batch what you can predict.** `phone_batch` runs a login form in one call, re-resolving each step's
+selector against a fresh screen, stopping at the first failure with exactly what ran. On the demo login:
 
 | | agent turns | device dumps | screen chars returned |
 |---|---|---|---|
 | one call per action | 4 | 12 | 2149 |
 | batched, adaptive rendering | **1** | **7** | **460** |
 
-Every step still passes through the policy pipeline, so a batch is not a way around the approval gate — a
-gated step halts the batch and hands back its `approvalId`.
+Every step still passes through policy, so a gated step halts the batch and hands back its `approvalId`.
 
-**Settle work is matched to the action.** Typing into a focused field cannot start an animation, so it
-costs one dump; a tap that might navigate gets a stability check; launching an app gets the long timeout.
-Where a provider can cheaply answer "is a transition still running?" that probe ends the wait early — it
-may only shorten the wait, never shorten the verification.
+**Settle work matches the action.** Typing into a focused field costs one dump; a tap that might navigate
+gets a stability check; launching an app gets the long timeout.
 
-**The screen is not re-sent when you already have it.** If the tree is byte-identical the result says so in
-one line; a small in-place change sends just the changed elements; navigation or a large change sends the
-whole tree. Batches always end on a full render, because the agent was blind while one ran. Set
-`renderMode: "full"` on the session to opt out.
+**The screen is not re-sent when the agent already has it.** Unchanged → one line; a small change → just
+the changed elements; navigation → the whole tree.
 
-**When the accessibility tree is empty** — a Flutter, canvas or game surface — the harness says so and
-attaches a screenshot automatically, instead of handing back a blank screen and letting the agent guess.
+**An empty accessibility tree** (Flutter, canvas, games) is detected and a screenshot is attached, instead
+of an empty screen and a guess.
 
 ---
 
 ## Safety model
 
-An agent with a phone holding real accounts is not a browser sandbox. The harness assumes the model is
-**not** trusted with irreversible actions.
+The harness assumes the model is **not** trusted with irreversible actions, and that anything it reads may
+be trying to steer it. Full model: **[SECURITY.md](SECURITY.md)**.
 
-**Three modes.** `observe` (read-only) · `guarded` (default — risky actions need a human) · `autonomous`
-(log only; for sandboxed devices).
+- **Modes**: `observe` (read-only) · `guarded` (default: risky actions need you) · `autonomous` (sandbox
+  phones only).
+- **The policy is a ceiling.** `~/.agent-phone/policy.json` (or panel → Setup) caps every session. An agent
+  may ask for less — `allowedApps` to scope itself to one app — never more.
+- **Bright lines**, refused even with approval: typing or pasting payment card numbers (Luhn-checked) or
+  government ID numbers; apps in `blockedApps` (Settings by default). The harness does not solve CAPTCHAs,
+  defeat attestation or spoof device identity.
+- **Secrets** are referenced by name, never returned, never logged, and scrubbed from screen trees,
+  errors and screenshots — including when typed into a field that echoes them.
+- **Budgets**: max actions and minutes per session. Idle sessions release the phone after 20 minutes.
+- **An action that happened is never reported as failed.** If the screen cannot be read afterwards the
+  result says so and tells the agent not to retry — retrying a completed payment is worse than a blind spot.
+- **Everything is recorded**: `agent-phone trace <id>` or panel → Activity.
 
-**Out-of-band approval.** A risky action returns `awaiting_approval` with an id and an evidence screenshot.
-A human decides elsewhere:
+Use dedicated accounts, not your personal ones. Automating third-party apps may breach their terms of
+service — that is the operator's call to make deliberately, per app.
+
+---
+
+## Physical devices and iOS
+
+Everything above works unchanged on a real Android phone — the escape hatch for apps that refuse virtual ones.
 
 ```bash
-agent-phone approvals --pending
-agent-phone approve 3f9c21aa
+brew install --cask android-platform-tools
+adb devices                           # accept the USB-debugging prompt
+adb tcpip 5555 && agent-phone connect 100.83.1.4:5555    # optional: over the network
+adb shell pm grant com.android.shell android.permission.READ_SMS   # optional: SMS on the device
 ```
 
-The agent then retries with `approvalId`. Approvals are single-shot and session-bound. Risk is matched on
-target text (pay/send/transfer/buy/order/delete/confirm/subscribe/agree) plus install, shell, clear-data
-and non-allowlisted URL schemes.
+Non-ASCII typing needs [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard) and `PHONE_ADB_KEYBOARD=1`.
 
-**Bright lines** — refused outright, with or without approval: entering payment card numbers (Luhn-checked)
-or government ID numbers, and any app in `blockedApps` (Settings by default). The harness also will not
-solve CAPTCHAs, defeat device attestation, or spoof device identity.
-
-**App scoping.** `allowedApps` confines a session to the app the task needs, so an agent cannot wander into
-Settings. If perception is unavailable and the foreground app cannot be verified, a scoped session refuses
-to act rather than acting blind.
-
-**Secrets.** Referenced by key, never returned, never logged, scrubbed from every trace line and error
-message. Password-flagged fields are blacked out of screenshots at full resolution *before* downscaling.
-
-**Budgets.** Max actions and max minutes per session — a looping agent can otherwise tap a phone 100,000
-times overnight.
-
-**An action that happened is never reported as failed.** If the side effect lands but the screen cannot be
-read afterwards, the result says so explicitly and tells the agent not to retry. Retrying a completed
-payment is worse than a blind spot.
-
-**Everything is recorded.** JSONL trace plus screenshot artifacts per session: `agent-phone trace <id>`.
-
-### Running this responsibly
-
-Use a dedicated Google account, not your personal one. Automating third-party apps may breach their terms
-of service — that is the operator's call to make deliberately, per app, which is why `allowedApps` is
-opt-in rather than open by default.
+**iOS**: `simctl`/`devicectl` cover lifecycle, screenshots and deep links; touch and perception need
+[WebDriverAgent](https://github.com/appium/WebDriverAgent) (`PHONE_WDA_URL`, default
+`http://127.0.0.1:8100`). Without it the harness says plainly what is unavailable.
 
 ---
 
-## Configuration
+## CLI
 
-| Env | Meaning |
-|---|---|
-| `PHONE_HOME` | state dir (default `~/.agent-phone`): secrets, approvals, session traces, emulator logs |
-| `PHONE_ADB` | explicit adb path |
-| `ANDROID_SDK_ROOT` | explicit SDK root for `agent-phone up` |
-| `PHONE_ADB_KEYBOARD=1` | route Android text through the ADBKeyboard broadcast |
-| `PHONE_WDA_URL` | WebDriverAgent base URL (default `http://127.0.0.1:8100`) |
-| `PHONE_API_TOKEN` | bearer token for the HTTP server; required to bind non-loopback |
-| `PHONE_APPROVAL_WEBHOOK` | POSTed when an approval is needed |
-| `PHONE_ALLOW_MOCK=1` | allow falling back to the built-in simulated phone when no real device is present |
-| `PHONE_SECRET_<KEY>` | inject a secret without a file |
-| `PHONE_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` \| `silent` |
+```bash
+agent-phone up | down | destroy        # the virtual phone
+agent-phone serve [--public]           # panel + MCP + REST + webhooks
+agent-phone mcp                        # MCP on stdio
+agent-phone panel-link | token | connect-info
+agent-phone approvals | approve <id> | deny <id>
+agent-phone secret set <name> | secret list
+agent-phone identity --number +15551234567 --email me@example.com
+agent-phone inbox | inbox add "code 123456" | notify-test
+agent-phone observe | tap --text Continue | type "hello" | otp | trace <id>
+agent-phone doctor | devices | demo
+```
 
-A starting policy is in [`config/policy.example.json`](config/policy.example.json).
-
-The simulated phone is **never** selected automatically unless you opt in — an agent must never believe it
-drove a real phone when it drove a simulation.
+Environment variables for everything are listed in [docs/hosting.md](docs/hosting.md#configuration);
+`PHONE_HOME` (default `~/.agent-phone`) holds tokens, secrets, approvals and traces.
 
 ---
-
-## Adding a backend
-
-Implement `Device` and `DeviceProvider`, register it in `Harness`. Nothing above the provider layer
-changes. Providers take an injectable command `Runner`, which is how the Android backend is fully
-unit-tested with no hardware attached — see `tests/android-device.test.ts`.
-
-Natural next backends: a cloud device farm, Waydroid, Corellium.
-
-## Roadmap
-
-Not in v1, in rough priority order:
-
-- **Telephony as a service** — a rented number or IMAP mailbox feeding `phone_wait_for_otp`, so a virtual
-  phone can complete real 2FA
-- **Compatibility matrix** — which apps actually run on a virtual device
-- **Device broker** — leases and routing, for running many phones across hosts
-- **Resident on-device observer** — push-based screen updates instead of polling
 
 ## Development
 
 ```bash
-npm install && npm run build
-npm test          # 163 tests, no hardware required
-npm run typecheck
+npm install          # builds too
+npm test             # ~260 tests, no device needed
+npm run dev -- serve --mock      # the panel against the simulated phone
+npm run e2e:android  # against a real emulator or phone
 ```
 
-The whole suite runs in CI with no devices attached: the mock phone covers the stack end to end, and the
-Android and iOS backends are tested against fake command runners and recorded fixtures.
+CI runs the suite on Node 20 and 22, builds and smoke-tests the container image, and runs the end-to-end
+check on real Android 11 and 14 emulators. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+To add a backend (a device farm, Waydroid), implement `Device` and `DeviceProvider` and register it in
+`Harness`; nothing above the provider layer changes.
+
+## Roadmap
+
+- **Compatibility matrix** from real reports ([docs/compatibility.md](docs/compatibility.md))
+- **Hosted multi-tenant service** — per-tenant isolation and billing, for people who do not want a VM
+- **Resident on-device observer** — push-based screen updates instead of polling
+- **iOS in the container path**, as far as Apple's tooling allows
 
 ## License
 

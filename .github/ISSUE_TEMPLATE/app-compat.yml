@@ -1,0 +1,38 @@
+name: App compatibility
+description: Report whether an app works on a virtual phone
+labels: [compatibility]
+body:
+  - type: input
+    id: app
+    attributes:
+      label: App and package id
+      placeholder: Uber — com.ubercab
+    validations:
+      required: true
+  - type: dropdown
+    id: phone
+    attributes:
+      label: Phone
+      options:
+        - agent-phone up (emulator, Play Store image)
+        - agent-phone up (emulator, google_apis image)
+        - container (redroid)
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works fully
+        - Works, but sign-in needed a human
+        - Installs but refuses to run (integrity / root check)
+        - Needs an SMS the virtual phone could not receive
+        - Accessibility tree empty (needed screenshots)
+        - Does not install
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
