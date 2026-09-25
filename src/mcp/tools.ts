@@ -2,9 +2,10 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { HarnessError } from "../core/errors.js";
-import type { Harness } from "../core/harness.js";
-import type { ActionResult, BatchStep, Session } from "../core/session.js";
+import type { Harness, Owner } from "../core/harness.js";
+import type { BatchStep, Session } from "../core/session.js";
 import type { Direction, KeyName, Selector, Target } from "../core/types.js";
+import { identityBlock, renderAction, renderBatch, renderError, renderHandoff, renderScreen, scrub } from "./render.js";
 
 /**
  * The agent-facing tool surface.
@@ -60,48 +61,22 @@ function optionalTarget(a: { ref?: string; selector?: Selector; x?: number; y?: 
   return undefined;
 }
 
-const text = (s: string): CallToolResult => ({ content: [{ type: "text", text: s }] });
+const text = (s: string): CallToolResult => ({ content: [{ type: "text", text: scrub(s) }] });
 
-const MODE_NOTE: Record<string, string> = {
-  unchanged: "",
-  partial: "\n(only the changed elements are shown; everything else is as in the previous screen)",
-  full: "",
-};
-
-function renderScreen(screen: ActionResult["screen"]): string {
-  const barren = screen.barren
-    ? "\n\nNOTE: this screen exposes almost no accessibility data (a canvas/Flutter/game surface). " +
-      "Element selectors will not work here — call phone_screenshot and tap by x/y coordinates."
-    : "";
-  return `${screen.elements}${screen.truncated ? "\n(tree truncated)" : ""}${MODE_NOTE[screen.mode] ?? ""}${barren}`;
-}
-
-function renderAction(r: ActionResult): string {
-  const head = `✓ ${r.action}${r.target ? ` → ${r.target}` : ""}`;
-  const meta = [r.change, r.settled ? null : "NOT SETTLED — UI still animating"].filter(Boolean).join(" | ");
-  const extra = r.data !== undefined ? `\n\n${JSON.stringify(r.data, null, 2)}` : "";
-  return `${head}\n${meta}\n\n${renderScreen(r.screen)}${extra}`;
-}
-
-/** Errors carry a `hint` precisely so an agent can recover without a human. */
-function fail(e: unknown): CallToolResult {
-  if (e instanceof HarnessError) {
-    const body = {
-      error: e.message,
-      code: e.code,
-      ...(e.hint ? { hint: e.hint } : {}),
-      ...(e.details ? { details: e.details } : {}),
-    };
-    return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
-  }
-  const msg = e instanceof Error ? e.message : String(e);
-  return { content: [{ type: "text", text: JSON.stringify({ error: msg }, null, 2) }], isError: true };
-}
+const fail = (e: unknown): CallToolResult => ({ content: [{ type: "text", text: renderError(e) }], isError: true });
 
 const guard = (fn: () => Promise<CallToolResult>) => fn().catch(fail);
 
-export function registerPhoneTools(server: McpServer, harness: Harness): void {
-  const S = (id?: string): Session => harness.resolve(id);
+export interface ToolOptions {
+  /**
+   * Sessions opened through this server belong to this owner, and implicit
+   * session resolution only sees them. One per MCP connection.
+   */
+  owner?: Owner;
+}
+
+export function registerPhoneTools(server: McpServer, harness: Harness, opts: ToolOptions = {}): void {
+  const S = (id?: string): Session => harness.resolve(id, opts.owner);
 
   // ------------------------------------------------------------- devices
 
@@ -115,7 +90,7 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
     },
     async () =>
       guard(async () => {
-        const devices = await harness.listDevices();
+        const devices = await harness.deviceStatus();
         if (!devices.length) return text("No devices found. Run `agent-phone doctor` on the host for a diagnosis.");
         return text(
           devices
@@ -123,7 +98,9 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
               (d) =>
                 `${d.id}  ${d.name}  [${d.platform}/${d.transport}]  ${d.state}` +
                 (d.osVersion ? `  os=${d.osVersion}` : "") +
-                (d.screen ? `  ${d.screen.width}x${d.screen.height}` : ""),
+                (d.screen ? `  ${d.screen.width}x${d.screen.height}` : "") +
+                (d.leasedBy ? `  (in use by session ${d.leasedBy})` : "") +
+                (d.control ? "  (a human has control)" : ""),
             )
             .join("\n"),
         );
@@ -145,7 +122,10 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
         mode: z
           .enum(["observe", "guarded", "autonomous"])
           .optional()
-          .describe("observe = read-only; guarded (default) = risky actions need human approval; autonomous = log only"),
+          .describe(
+            "observe = read-only; guarded (default) = risky actions need human approval; autonomous = log only. " +
+              "Capped by the operator's policy — asking for more than it allows is reported, not granted.",
+          ),
         allowedApps: z.array(z.string()).optional().describe('package/bundle ids this session may drive; "com.foo.*" globs allowed'),
         allowShell: z.boolean().optional(),
         allowInstall: z.boolean().optional(),
@@ -161,6 +141,7 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
     async (a) =>
       guard(async () => {
         const session = await harness.createSession({
+          ...(opts.owner ? { owner: opts.owner } : {}),
           ...(a.deviceId ? { deviceId: a.deviceId } : {}),
           ...(a.platform ? { platform: a.platform } : {}),
           ...(a.approvalWaitMs ? { approvalWaitMs: a.approvalWaitMs } : {}),
@@ -174,9 +155,10 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
         });
         const snap = await session.observe();
         const view = session.view(snap);
+        const notes = session.notes.length ? `\nnote: ${session.notes.join("\nnote: ")}` : "";
         return text(
-          `session ${session.id} on ${session.device.info.name} (${session.device.info.id}), mode=${session.policy.config.mode}\n` +
-            `trace: ${session.audit.tracePath}\n\n${view.elements}`,
+          `session ${session.id} on ${session.device.info.name} (${session.device.info.id}), mode=${session.policy.config.mode}` +
+            `${notes}\n${identityBlock(session)}\n\n${view.elements}`,
         );
       }),
   );
@@ -184,7 +166,11 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
   server.registerTool(
     "phone_session_status",
     { description: "Session stats: device, mode, actions used, budget, trace path.", inputSchema: { ...sessionShape } },
-    async (a) => guard(async () => text(JSON.stringify(S(a.sessionId).stats(), null, 2))),
+    async (a) =>
+      guard(async () => {
+        const s = S(a.sessionId);
+        return text(`${JSON.stringify(s.stats(), null, 2)}\n${identityBlock(s)}`);
+      }),
   );
 
   server.registerTool(
@@ -619,20 +605,7 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
           ...(a.stopOnError !== undefined ? { stopOnError: a.stopOnError } : {}),
         });
 
-        const lines = r.steps.map((st) => {
-          const head = `${st.ok ? "✓" : "✗"} ${st.index}. ${st.action}${st.target ? ` → ${st.target}` : ""}`;
-          if (st.ok) return `${head}${st.change ? `  (${st.change})` : ""}`;
-          return `${head}\n     ${st.code ? `[${st.code}] ` : ""}${st.error}${st.hint ? `\n     hint: ${st.hint}` : ""}` +
-            `${st.approvalId ? `\n     approvalId: ${st.approvalId}` : ""}`;
-        });
-        const summary =
-          `${r.ok ? "batch complete" : "batch stopped"}: ${r.completed}/${r.total} steps` +
-          `${r.stoppedAt !== undefined ? ` (stopped at step ${r.stoppedAt})` : ""}`;
-        const remaining =
-          r.stoppedAt !== undefined
-            ? `\n\n${r.total - r.completed} step(s) were not attempted. Re-send them once the problem above is resolved.`
-            : "";
-        return text(`${summary}\n${lines.join("\n")}${remaining}\n\n${renderScreen(r.screen)}`);
+        return text(renderBatch(r));
       }),
   );
 
@@ -662,21 +635,26 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
   server.registerTool(
     "phone_read_sms",
     {
-      description: "Read recent SMS. The usual way to collect a one-time code — see also phone_wait_for_otp.",
+      description:
+        "Read recent text messages from every source the operator connected: SMS on the device, a rented " +
+        "number, a relay phone, a mailbox. For a one-time code use phone_wait_for_otp instead.",
       inputSchema: {
         ...sessionShape,
         limit: z.number().int().positive().optional(),
-        sinceMinutes: z.number().positive().optional().describe("only messages newer than this"),
+        sinceMinutes: z.number().positive().optional().describe("only messages newer than this (default 24h)"),
       },
     },
     async (a) =>
       guard(async () => {
-        const msgs = await S(a.sessionId).readSms({
+        const r = await S(a.sessionId).readMessages({
           ...(a.limit !== undefined ? { limit: a.limit } : {}),
           ...(a.sinceMinutes !== undefined ? { sinceMs: Date.now() - a.sinceMinutes * 60_000 } : {}),
         });
-        if (!msgs.length) return text("no messages");
-        return text(msgs.map((m) => `[${new Date(m.timestamp).toISOString()}] ${m.from}: ${m.body}`).join("\n"));
+        const lines = r.messages.map(
+          (m) => `[${new Date(m.receivedAt).toISOString()}] (${m.origin}) ${m.from}: ${m.body.replace(/\s+/g, " ").slice(0, 400)}`,
+        );
+        const errs = r.errors.map((e) => `(could not read ${e.source}: ${e.error})`);
+        return text([...(lines.length ? lines : ["no messages"]), ...errs].join("\n"));
       }),
   );
 
@@ -698,25 +676,64 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
     "phone_wait_for_otp",
     {
       description:
-        "Wait for a one-time code to arrive by SMS or notification and return it. This is how a 2FA step gets " +
-        "completed without a human. The code is returned to you so you can type it; use phone_type to enter it.",
+        "Wait for a one-time code (SMS, the operator's connected number, email, or a notification) and either " +
+        "return it or type it for you. This is how a 2FA step gets completed without a human.\n\n" +
+        "Prefer enter:true with the code field as target — the code is typed directly and one call replaces " +
+        "two. A code is never returned twice, so after a failed attempt this waits for the new one.",
       inputSchema: {
         ...sessionShape,
+        ...targetShape,
+        enter: z.boolean().optional().describe("type the code into the target (or the focused field) instead of returning it"),
+        submit: z.boolean().optional().describe("with enter: press enter afterwards"),
         fromContains: z.string().optional().describe("filter by sender"),
         bodyContains: z.string().optional().describe("filter by message content, e.g. the brand name"),
-        digits: z.number().int().min(4).max(8).optional().describe("default 6"),
+        digits: z.number().int().min(4).max(8).optional().describe("exact code length, if known"),
         timeoutMs: z.number().int().positive().optional().describe("default 60000"),
       },
     },
     async (a) =>
       guard(async () => {
+        const target = optionalTarget(a);
         const r = await S(a.sessionId).waitForOtp({
           ...(a.fromContains ? { fromContains: a.fromContains } : {}),
           ...(a.bodyContains ? { bodyContains: a.bodyContains } : {}),
           ...(a.digits !== undefined ? { digits: a.digits } : {}),
           ...(a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {}),
+          ...(a.enter ? { enter: true } : {}),
+          ...(target ? { target } : {}),
+          ...(a.submit !== undefined ? { submit: a.submit } : {}),
         });
-        return text(`code: ${r.code}`);
+        if (r.entered && r.result) {
+          return text(`code from ${r.message.from} (${r.message.origin}) entered\n${renderAction(r.result)}`);
+        }
+        return text(`code: ${r.code}\nfrom ${r.message.from} via ${r.message.origin}`);
+      }),
+  );
+
+  server.registerTool(
+    "phone_request_human",
+    {
+      description:
+        "Ask the phone's owner to step in. Use it for anything you must not or cannot do yourself: a CAPTCHA, " +
+        "a Google or Apple sign-in, a biometric prompt, a device-verification wall, an ambiguous decision. " +
+        "The owner is notified, takes control of the phone, and hands it back.\n\n" +
+        "Returns status done, declined, or pending. On pending, call again with the same handoffId to keep " +
+        "waiting and do nothing else on the phone meanwhile. After done, observe before continuing — the " +
+        "screen will have changed.",
+      inputSchema: {
+        ...sessionShape,
+        reason: z.string().describe("what you need the human to do, in one sentence"),
+        handoffId: z.string().optional().describe("continue waiting on an earlier request"),
+        waitSeconds: z.number().int().min(1).max(55).optional().describe("how long to block this call (default 45)"),
+      },
+    },
+    async (a) =>
+      guard(async () => {
+        const r = await S(a.sessionId).requestHuman(a.reason, {
+          ...(a.handoffId ? { handoffId: a.handoffId } : {}),
+          ...(a.waitSeconds ? { waitMs: a.waitSeconds * 1000 } : {}),
+        });
+        return text(renderHandoff(r).replace("Call request_human", "Call phone_request_human"));
       }),
   );
 
@@ -726,16 +743,6 @@ export function registerPhoneTools(server: McpServer, harness: Harness): void {
       description: "Read or write the device clipboard. Useful for pasting long or non-ASCII text.",
       inputSchema: { ...sessionShape, action: z.enum(["get", "set"]), text: z.string().optional() },
     },
-    async (a) =>
-      guard(async () => {
-        const d = S(a.sessionId).device;
-        if (a.action === "set") {
-          if (!d.clipboardSet) throw new HarnessError("unsupported", "clipboard write unavailable on this device");
-          await d.clipboardSet(a.text ?? "");
-          return text("clipboard set");
-        }
-        if (!d.clipboardGet) throw new HarnessError("unsupported", "clipboard read unavailable on this device");
-        return text(await d.clipboardGet());
-      }),
+    async (a) => guard(async () => text(await S(a.sessionId).clipboard(a.action, a.text ?? ""))),
   );
 }
