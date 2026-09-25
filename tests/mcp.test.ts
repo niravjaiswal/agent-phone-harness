@@ -9,6 +9,7 @@ describe("MCP tool surface", () => {
   let client: Client;
   let harness: Harness;
   let sessionId: string;
+  let otpCode: string;
 
   const textOf = (r: unknown): string =>
     ((r as { content: { type: string; text?: string }[] }).content ?? [])
@@ -112,6 +113,13 @@ describe("MCP tool surface", () => {
     await call("phone_tap", { sessionId, selector: { text: "Sign in" } });
     const out = textOf(await call("phone_wait_for_otp", { sessionId, digits: 6, timeoutMs: 8000 }));
     expect(out).toMatch(/code: \d{6}/);
+    otpCode = /code: (\d{6})/.exec(out)![1]!;
+  });
+
+  it("never hands out the same code twice", async () => {
+    const r = (await call("phone_wait_for_otp", { sessionId, digits: 6, timeoutMs: 2500 })) as { isError?: boolean };
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toContain('"code": "timeout"');
   });
 
   it("returns a structured, hint-carrying error instead of throwing", async () => {
@@ -127,8 +135,7 @@ describe("MCP tool surface", () => {
 
   it("surfaces a pending approval as a retryable error with an id", async () => {
     // Finish the login so the money screen is reachable.
-    const otp = textOf(await call("phone_wait_for_otp", { sessionId, digits: 6, timeoutMs: 8000 })).replace("code: ", "").trim();
-    await call("phone_type", { sessionId, selector: { label: "Verification code" }, text: otp });
+    await call("phone_type", { sessionId, selector: { label: "Verification code" }, text: otpCode });
     await call("phone_tap", { sessionId, selector: { text: "Verify" } });
 
     const r = (await call("phone_tap", { sessionId, selector: { text: "Send money" } })) as { isError?: boolean };
@@ -148,7 +155,7 @@ describe("MCP tool surface", () => {
   it("runs a multi-step batch in one call and ends on a full screen", async () => {
     const fresh = textOf(
       await call("phone_session_start", {
-        deviceId: "mock:demo",
+        deviceId: "mock:batch",
         allowedApps: ["com.example.demobank", "com.mock.launcher"],
         approvalWaitMs: 1500,
       }),
@@ -174,7 +181,7 @@ describe("MCP tool surface", () => {
   }, 30_000);
 
   it("reports a partial batch with the failing step and what was skipped", async () => {
-    const fresh = textOf(await call("phone_session_start", { deviceId: "mock:demo", approvalWaitMs: 1500 }));
+    const fresh = textOf(await call("phone_session_start", { deviceId: "mock:partial", approvalWaitMs: 1500 }));
     const id = /session (\w+) on/.exec(fresh)![1]!;
 
     const out = textOf(
@@ -195,7 +202,7 @@ describe("MCP tool surface", () => {
   }, 30_000);
 
   it("lists the deep links an app declares", async () => {
-    const fresh = textOf(await call("phone_session_start", { deviceId: "mock:demo", approvalWaitMs: 1500 }));
+    const fresh = textOf(await call("phone_session_start", { deviceId: "mock:links", approvalWaitMs: 1500 }));
     const id = /session (\w+) on/.exec(fresh)![1]!;
     const out = textOf(await call("phone_list_deep_links", { sessionId: id, appId: "com.example.demobank" }));
     expect(out).toContain("demobank://send");

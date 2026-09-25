@@ -1,6 +1,7 @@
 export type ErrorCode =
   | "device_unreachable"
   | "device_not_found"
+  | "device_busy"
   | "tool_missing"
   | "timeout"
   | "stale_ref"
