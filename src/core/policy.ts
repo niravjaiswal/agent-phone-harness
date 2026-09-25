@@ -22,7 +22,8 @@ export type ActionKind =
   | "read_notifications"
   | "clipboard_get"
   | "clipboard_set"
-  | "shell";
+  | "shell"
+  | "handoff";
 
 export interface ActionDescriptor {
   kind: ActionKind;
@@ -147,7 +148,8 @@ export class Policy {
     const c = this.config;
 
     // --- hard bright lines, regardless of mode ---
-    if (a.kind === "type" && a.text) {
+    // Clipboard is checked too: set-then-paste would otherwise be a way around the bright line.
+    if ((a.kind === "type" || a.kind === "clipboard_set") && a.text) {
       if (looksLikeCard(a.text)) {
         return { risk: "deny", reason: "text looks like a payment card number; the harness never enters card details" };
       }
@@ -203,8 +205,10 @@ export class Policy {
     }
     if (a.targetText) {
       for (const re of this.confirmRe) {
-        if (re.test(a.targetText)) {
-          return { risk: "confirm", reason: `target text matches risky pattern /${re.source}/` };
+        const m = re.exec(a.targetText);
+        if (m) {
+          // Name the words, not the regex: a human reads this on their phone.
+          return { risk: "confirm", reason: `the target says "${m[0]}", which can move money, delete data or commit you to something` };
         }
       }
     }
