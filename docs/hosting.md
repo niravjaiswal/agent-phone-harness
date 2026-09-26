@@ -34,7 +34,7 @@ Prices change; these are rough, for one phone.
 | Provider | Machine | Roughly |
 |---|---|---|
 | Oracle Cloud | Always Free Ampere A1 (arm64) | free, if you can get capacity |
-| Hetzner | CAX11 (arm64, 4 GB) | ~€4/month |
+| Hetzner | CAX11 (arm64, 4 GB) | ~€6/month (€5.99 since June 2026) |
 | AWS | t4g.medium (arm64, 4 GB) | ~$25/month |
 | Any | 4 GB Ubuntu VM | $5–25/month |
 

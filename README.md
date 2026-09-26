@@ -6,7 +6,7 @@ A virtual Android phone your agent drives by reading its screen as text, plus th
 real tasks finish: **a phone number for 2FA codes**, **your approval for anything risky, from your
 own phone**, a way for the agent to **ask you for a hand**, and a record of everything it did.
 Works with agents that run on your machine (Claude Code, Cursor — over MCP) and agents that run in
-the cloud and cannot install anything (Instinct — over HTTPS).
+the cloud and cannot run a phone themselves (Instinct — over HTTPS).
 
 ```bash
 npx -y github:niravjaiswal/agent-phone-harness demo

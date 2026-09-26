@@ -1,8 +1,10 @@
 # Using agent-phone with Instinct
 
-Instinct runs in the cloud. It can browse and run scripts, but it cannot install
-software or run an emulator. So the phone runs somewhere else, and Instinct gets
-an address and a token. Nothing is installed on Instinct's side.
+Instinct runs in the cloud. It can browse and run scripts, but it cannot host a
+phone: its sandbox is small and short-lived, has no hardware virtualization for
+an Android emulator, and has no way to serve an always-on public address. So the
+phone runs somewhere else, and Instinct gets an address and a token. Nothing is
+installed on Instinct's side.
 
 ```
 Instinct ──HTTPS──▶ tunnel ──▶ agent-phone ──adb──▶ Android
@@ -23,7 +25,7 @@ agent-phone up               # creates and boots a virtual Android phone (~1.5 G
 agent-phone serve --public   # needs cloudflared: brew install cloudflared
 ```
 
-### On an always-on server (about €4/month, or free)
+### On an always-on server (about €6/month, or free)
 
 Any Ubuntu 22.04/24.04 or Debian 12 VM with 4 GB of RAM. ARM is cheapest. See
 [hosting.md](hosting.md) for providers.
