@@ -76,6 +76,31 @@ describe("boot detection", () => {
       waitForBoot("/fake/adb", "emulator-5554", run, { timeoutMs: 120, intervalMs: 10 }),
     ).rejects.toThrowError(/did not finish booting/);
   });
+
+  it("stops at once when the emulator dies, and quotes its log", async () => {
+    const logFile = join(mkdtempSync(join(tmpdir(), "emu-log-")), "agent-phone-5554.log");
+    writeFileSync(logFile, "INFO | booting\nERROR | x86_64 emulation currently requires hardware acceleration!\n");
+    const run: Runner = async () => ok("\n");
+    const started = Date.now();
+    const e = await waitForBoot("/fake/adb", "emulator-5554", run, {
+      timeoutMs: 60_000,
+      intervalMs: 10,
+      exited: () => true,
+      logFile,
+    }).catch((x: unknown) => x as Error);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(e.message).toContain("exited before Android finished booting");
+    expect(e.message).toContain("requires hardware acceleration");
+  });
+
+  it("quotes the log on a timeout too", async () => {
+    const logFile = join(mkdtempSync(join(tmpdir(), "emu-log-")), "agent-phone-5554.log");
+    writeFileSync(logFile, "WARNING | still waiting for the system image\n");
+    const run: Runner = async () => ok("\n");
+    await expect(
+      waitForBoot("/fake/adb", "emulator-5554", run, { timeoutMs: 80, intervalMs: 10, logFile }),
+    ).rejects.toThrowError(/still waiting for the system image/);
+  });
 });
 
 /**
