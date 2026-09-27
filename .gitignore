@@ -8,3 +8,7 @@ dist/
 .claude/launch.json
 # deployment secrets
 deploy/.env
+# research and analysis output — local only, never published
+reports/
+research_notes/
+graphify-out/
