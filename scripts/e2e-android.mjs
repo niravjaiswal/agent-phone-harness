@@ -6,8 +6,9 @@
 // Android build lays out Settings only warn.
 //
 //   npm run build && node scripts/e2e-android.mjs [android:<serial>]
-import { execFileSync } from "node:child_process";
 import { Harness } from "../dist/index.js";
+import { findAdb } from "../dist/providers/android/adb.js";
+import { sendEmulatorSms } from "../dist/virtual/avd.js";
 
 let failures = 0;
 const log = (...a) => console.log("[e2e]", ...a);
@@ -90,7 +91,13 @@ await attempt(() => session.pressKey("home"));
 // ---- SMS: the emulator console injects a message; the harness must read it from the provider
 const hasConsole = serial.startsWith("emulator-");
 if (hasConsole) {
-  execFileSync("adb", ["-s", serial, "emu", "sms", "send", "5551234", "Your E2E verification code is 424242"]);
+  // The harness's own adb discovery, not PATH: a plain runner has the SDK but
+  // not platform-tools on PATH.
+  const adbPath = await findAdb();
+  const sent = adbPath
+    ? await attempt(() => sendEmulatorSms(adbPath, serial, "5551234", "Your E2E verification code is 424242"))
+    : new Error("adb not found");
+  check(!(sent instanceof Error), `SMS injected through the emulator console${sent instanceof Error ? `: ${sent.message}` : ""}`);
   const otp = await attempt(() => session.waitForOtp({ timeoutMs: 45_000 }));
   check(!(otp instanceof Error) && otp.code === "424242", `one-time code read back${otp instanceof Error ? `: ${otp.message}` : ` via ${otp.message.origin}`}`);
   const sms = await attempt(() => session.readSms({ limit: 5 }));
