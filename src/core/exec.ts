@@ -128,13 +128,18 @@ export function spawnDetached(
   cmd: string,
   args: string[],
   opts: { env?: Record<string, string>; logFile?: string } = {},
-): { pid: number | undefined } {
+): { pid: number | undefined; exited: () => boolean } {
   const out = opts.logFile ? openSync(opts.logFile, "a") : "ignore";
   const child = spawn(cmd, args, {
     detached: true,
     stdio: ["ignore", out, out],
     env: opts.env ? { ...process.env, ...opts.env } : process.env,
   });
+  // A process that dies at launch should be reported at once, not discovered
+  // when a boot wait times out minutes later.
+  let exited = false;
+  child.on("exit", () => (exited = true));
+  child.on("error", () => (exited = true));
   child.unref();
-  return { pid: child.pid };
+  return { pid: child.pid, exited: () => exited };
 }

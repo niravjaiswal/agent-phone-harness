@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { err } from "../core/errors.js";
@@ -184,6 +184,15 @@ export function emulatorArgs(opts: BootOptions): string[] {
   return args;
 }
 
+/** The last lines of a log file, or "" if it cannot be read. */
+function tailOf(path: string, lines = 40): string {
+  try {
+    return readFileSync(path, "utf8").trimEnd().split("\n").slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Poll until Android is actually usable.
  *
@@ -194,9 +203,20 @@ export async function waitForBoot(
   adbPath: string,
   serial: string,
   run: Runner = runCommand,
-  opts: { timeoutMs?: number; intervalMs?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    /** True once the emulator process has exited; the wait stops at once. */
+    exited?: () => boolean;
+    /** The emulator's log, quoted in the error so the cause is visible. */
+    logFile?: string;
+  } = {},
 ): Promise<void> {
   const deadline = Date.now() + (opts.timeoutMs ?? 300_000);
+  const logTail = () => {
+    const t = opts.logFile ? tailOf(opts.logFile) : "";
+    return t ? `\n--- last lines of ${opts.logFile} ---\n${t}` : "";
+  };
   for (;;) {
     const booted = await run(adbPath, ["-s", serial, "shell", "getprop", "sys.boot_completed"], {
       timeoutMs: 10_000,
@@ -211,9 +231,16 @@ export async function waitForBoot(
       if (pm?.stdout.includes("package:")) return;
     }
 
+    // Checked after the boot probe, so a launcher that hands off to a child
+    // process and exits is never mistaken for a crash.
+    if (opts.exited?.()) {
+      throw err("provider_error", `The emulator for ${serial} exited before Android finished booting${logTail()}`, {
+        hint: "The emulator log above says why. Common causes: no hardware acceleration (/dev/kvm), not enough memory, or a broken virtual device (`agent-phone destroy`, then `agent-phone up`).",
+      });
+    }
     if (Date.now() > deadline) {
-      throw err("timeout", `${serial} did not finish booting in time`, {
-        hint: "First boot of a fresh image is slow. Retry, or check the emulator log printed above.",
+      throw err("timeout", `${serial} did not finish booting in time${logTail()}`, {
+        hint: "First boot of a fresh image is slow. Retry; if it keeps failing, the emulator log above says why.",
       });
     }
     await sleep(opts.intervalMs ?? 3000);

@@ -110,7 +110,7 @@ export class VirtualPhoneManager {
     const logFile = join(logDir, `${name}-${port}.log`);
 
     this.say(opts, `booting ${serial}${opts.headless === false ? "" : " (headless)"}`);
-    const { pid } = spawnDetached(
+    const { pid, exited } = spawnDetached(
       sdk.emulator,
       emulatorArgs({
         name,
@@ -123,7 +123,7 @@ export class VirtualPhoneManager {
     log.debug(`emulator pid ${pid}, log ${logFile}`);
 
     this.say(opts, "waiting for Android to finish booting (first boot is slow)");
-    await waitForBoot(adbPath, serial, this.run);
+    await waitForBoot(adbPath, serial, this.run, { exited, logFile });
 
     this.say(opts, `ready: android:${serial}`);
     return { deviceId: `android:${serial}`, serial, avd: name, port, logFile };
