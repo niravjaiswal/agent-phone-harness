@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { err } from "../core/errors.js";
@@ -18,6 +18,23 @@ export interface SdkPaths {
   sdkmanager: string;
   avdmanager: string;
   emulator: string;
+}
+
+/**
+ * Where virtual devices live. avdmanager and the emulator must be told the
+ * same place: left to their own defaults they can disagree (GitHub's runners
+ * are one example), and the emulator then cannot find the device avdmanager
+ * just created — "Unknown AVD name".
+ */
+export function avdHome(): string {
+  return process.env.ANDROID_AVD_HOME || join(homedir(), ".android", "avd");
+}
+
+/** Environment for every avdmanager and emulator invocation. */
+export function avdEnv(): Record<string, string> {
+  const home = avdHome();
+  mkdirSync(home, { recursive: true });
+  return { ANDROID_AVD_HOME: home };
 }
 
 /** Read at call time, not import time — env can legitimately change after load. */
@@ -85,7 +102,7 @@ export function systemImage(opts: { api?: number; variant?: string; arch?: strin
 }
 
 export async function listAvds(sdk: SdkPaths, run: Runner = runCommand): Promise<string[]> {
-  const r = await run(sdk.avdmanager, ["list", "avd", "-c"], { timeoutMs: 60_000, allowFailure: true });
+  const r = await run(sdk.avdmanager, ["list", "avd", "-c"], { timeoutMs: 60_000, allowFailure: true, env: avdEnv() });
   return r.stdout.split("\n").map((l) => l.trim()).filter((l) => l && !l.includes(" "));
 }
 
@@ -135,12 +152,12 @@ export async function createAvd(
       "--sdcard", `${opts.sdcardMb ?? 2048}M`,
       "--force",
     ],
-    { input: "no\n", timeoutMs: 300_000 },
+    { input: "no\n", timeoutMs: 300_000, env: avdEnv() },
   );
 }
 
 export async function deleteAvd(sdk: SdkPaths, name: string, run: Runner = runCommand): Promise<void> {
-  await run(sdk.avdmanager, ["delete", "avd", "--name", name], { timeoutMs: 60_000, allowFailure: true });
+  await run(sdk.avdmanager, ["delete", "avd", "--name", name], { timeoutMs: 60_000, allowFailure: true, env: avdEnv() });
 }
 
 /** Emulator consoles bind even ports from 5554; find one nothing is using. */

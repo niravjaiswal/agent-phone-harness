@@ -81,6 +81,7 @@ jobs:
         run: |
           ls -l /dev/kvm || true
           nproc; free -m
+          env | grep -E '^ANDROID' | sort || true
           ls -la ~/.android/avd || true
           cat ~/.android/avd/agent-phone.avd/config.ini 2>/dev/null | sort || true
           for f in ~/.agent-phone/logs/*.log; do echo "=== $f"; tail -n 150 "$f"; done

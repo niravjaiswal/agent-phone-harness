@@ -9,7 +9,7 @@ import { parseDevices } from "../providers/android/adb.js";
 import {
   createAvd, deleteAvd, emulatorArgs, findSdk, freeEmulatorPort, INSTALL_HINT,
   installPackages, killEmulator, listAvds, listInstalledPackages, systemImage,
-  waitForBoot, type SdkPaths,
+  avdEnv, waitForBoot, type SdkPaths,
 } from "./avd.js";
 
 const log = logger("virtual");
@@ -118,7 +118,7 @@ export class VirtualPhoneManager {
         ...(opts.headless !== undefined ? { headless: opts.headless } : {}),
         ...(opts.wipe !== undefined ? { wipe: opts.wipe } : {}),
       }),
-      { logFile, env: { ANDROID_SDK_ROOT: sdk.root, ANDROID_AVD_HOME: join(process.env.HOME ?? "", ".android", "avd") } },
+      { logFile, env: { ANDROID_SDK_ROOT: sdk.root, ...avdEnv() } },
     );
     log.debug(`emulator pid ${pid}, log ${logFile}`);
 

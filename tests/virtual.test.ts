@@ -1,9 +1,9 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  emulatorArgs, freeEmulatorPort, systemImage, waitForBoot,
+  avdHome, createAvd, emulatorArgs, freeEmulatorPort, listAvds, systemImage, waitForBoot,
 } from "../src/virtual/avd.js";
 import { VirtualPhoneManager } from "../src/virtual/index.js";
 import type { ExecResult, Runner } from "../src/core/exec.js";
@@ -200,5 +200,39 @@ describe("VirtualPhoneManager.up", () => {
     const { run, find } = fakeSdk({ installed: ["platform-tools", "emulator", image], avds: ["agent-phone"] });
     await new VirtualPhoneManager(run).up({ name: "agent-phone" });
     expect(find("create avd")).toBeUndefined();
+  });
+});
+
+describe("where virtual devices live", () => {
+  const sdk = { root: "/sdk", sdkmanager: "/sdk/sm", avdmanager: "/sdk/am", emulator: "/sdk/emu" };
+
+  it("tells avdmanager the same place the emulator will look, honouring ANDROID_AVD_HOME", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avd-home-"));
+    const prev = process.env.ANDROID_AVD_HOME;
+    process.env.ANDROID_AVD_HOME = dir;
+    try {
+      const envs: (Record<string, string> | undefined)[] = [];
+      const run: Runner = async (_cmd, _args, opts) => {
+        envs.push(opts?.env);
+        return ok();
+      };
+      await createAvd(sdk, { name: "agent-phone", image: "system-images;android-34;google_apis;x86_64" }, run);
+      await listAvds(sdk, run);
+      expect(envs).toEqual([{ ANDROID_AVD_HOME: dir }, { ANDROID_AVD_HOME: dir }]);
+      expect(avdHome()).toBe(dir);
+    } finally {
+      if (prev === undefined) delete process.env.ANDROID_AVD_HOME;
+      else process.env.ANDROID_AVD_HOME = prev;
+    }
+  });
+
+  it("defaults to ~/.android/avd", () => {
+    const prev = process.env.ANDROID_AVD_HOME;
+    delete process.env.ANDROID_AVD_HOME;
+    try {
+      expect(avdHome()).toBe(join(homedir(), ".android", "avd"));
+    } finally {
+      if (prev !== undefined) process.env.ANDROID_AVD_HOME = prev;
+    }
   });
 });
