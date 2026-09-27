@@ -6,12 +6,26 @@ name: android
 on:
   push:
     branches: [main]
+  # Also on PRs that touch the code these jobs exercise, so a break shows up
+  # before it reaches main rather than after.
+  pull_request:
+    paths:
+      - "src/virtual/**"
+      - "src/providers/android/**"
+      - "src/core/exec.ts"
+      - "scripts/e2e-android.mjs"
+      - ".github/workflows/android.yml"
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * 1"
 
 permissions:
   contents: read
+
+# Emulator jobs are slow; a newer push to the same ref supersedes the older run.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   e2e:
@@ -62,5 +76,13 @@ jobs:
       - run: node dist/cli.js up --api 34 --variant google_apis
       - run: node dist/cli.js devices
       - run: node scripts/e2e-android.mjs
+      - name: emulator diagnostics
+        if: failure()
+        run: |
+          ls -l /dev/kvm || true
+          nproc; free -m
+          ls -la ~/.android/avd || true
+          cat ~/.android/avd/agent-phone.avd/config.ini 2>/dev/null | sort || true
+          for f in ~/.agent-phone/logs/*.log; do echo "=== $f"; tail -n 150 "$f"; done
       - if: always()
         run: node dist/cli.js down || true
