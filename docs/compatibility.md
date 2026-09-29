@@ -28,8 +28,9 @@ Rules of thumb:
 - **Canvas / Flutter / game UIs** expose little to accessibility. The harness detects this and
   hands the agent a screenshot to work from, which is slower and less precise.
 
-If an app refuses a virtual phone, the only real fix is a physical Android phone (see the
-README). The harness drives it identically.
+If an app refuses a virtual phone, the only real fix is a physical phone. The harness drives a
+spare Android phone identically ([setup](../README.md#a-spare-android-phone)); iPhone support is
+partial ([details](../README.md#an-iphone)).
 
 ## Reports
 
